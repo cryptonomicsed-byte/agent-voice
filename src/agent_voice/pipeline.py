@@ -29,6 +29,17 @@ try:
 except ImportError:
     HAS_AIORTC = False
 
+    # Stubs so the module still imports when aiortc/av are absent — e.g. Termux,
+    # where `av` cannot build (needs ffmpeg dev headers). Without these the
+    # module-level `class QueueAudioTrack(AudioStreamTrack)` raises NameError at
+    # import and takes the whole pipeline (LLM/STT/TTS included) down with it.
+    # The media path is still gated on HAS_AIORTC, so nothing silently runs.
+    class AudioStreamTrack:  # type: ignore[no-redef]
+        pass
+
+    class MediaStreamError(Exception):  # type: ignore[no-redef]
+        pass
+
 IN_RATE = 16000
 OUT_RATE = 48000
 FRAME_MS = 20
@@ -244,13 +255,24 @@ class CardGroundedAgent:
                 f"You are {bot_name}, a friendly voice assistant. "
                 "Keep replies to one or two short spoken sentences.")
         self._client = None
-        if backend == "deepseek":
-            if not os.environ.get("DEEPSEEK_API_KEY"):
-                raise RuntimeError("DEEPSEEK_API_KEY is not set")
+        self._model: str = "deepseek-chat"
+        if backend in ("deepseek", "openai"):
+            # Provider resolution: an explicit LLM_* env override wins over the
+            # DeepSeek default, so ANY OpenAI-compatible endpoint (NVIDIA NIM,
+            # OpenRouter, a local Ollama, self-hosted vLLM) can back the voice
+            # agent without a code change. DeepSeek stays the default for
+            # backward compatibility when nothing is overridden.
+            key = os.environ.get("LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
+            if not key:
+                raise RuntimeError(
+                    "no LLM key: set LLM_API_KEY (or DEEPSEEK_API_KEY)")
+            base = (os.environ.get("LLM_BASE_URL")
+                    or os.environ.get("DEEPSEEK_BASE_URL")
+                    or "https://api.deepseek.com")
+            self._model = (os.environ.get("LLM_MODEL")
+                           or ("deepseek-chat" if "deepseek" in base else "gpt-4o-mini"))
             from openai import OpenAI
-            self._client = OpenAI(
-                api_key=os.environ["DEEPSEEK_API_KEY"],
-                base_url="https://api.deepseek.com")
+            self._client = OpenAI(api_key=key, base_url=base)
         elif backend != "echo":
             raise ValueError(f"unknown backend: {backend}")
 
@@ -258,7 +280,7 @@ class CardGroundedAgent:
         if self.backend == "echo":
             return f"You said: {text}"
         resp = self._client.chat.completions.create(
-            model="deepseek-chat",
+            model=self._model,
             messages=[{"role": "system", "content": self.system},
                       {"role": "user", "content": text}],
             max_tokens=150,
