@@ -1,4 +1,6 @@
 aiortc>=1.9.0
+websockets>=14.0
+pyyaml>=6.0
 # agent-phone is a sibling repo; install from source:
 # pip install git+https://github.com/cryptonomicsed-byte/agent-phone.git
 # (or vendor the signaling module)

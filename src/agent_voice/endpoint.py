@@ -5,11 +5,12 @@ performs the WebRTC handshake via aiortc, and streams audio.
 
 Signaling message format comes from agent-phone's signaling module.
 Nostr transport uses minipae's crypto + a direct websockets subscription
-(minipae.subscribe_stream is hardcoded to engram kind; we need kind:1059).
+with NIP-42 AUTH support for relays that require authentication.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -33,23 +34,68 @@ except ImportError:
     log.warning("aiortc not installed; media disabled")
 
 KIND_GIFT_WRAP = 1059
+KIND_AUTH = 22242
 
 
-async def subscribe_calls(relay: str, our_pubkey_hex: str):
-    """Yield kind:1059 gift-wrap events addressed to us, live."""
-    import websockets
+def _nip42_event(challenge: str, relay_url: str, seckey: bytes) -> dict:
+    """Build and sign a NIP-42 AUTH event (kind:22242)."""
+    content = ""
+    tags = [["relay", relay_url], ["challenge", challenge]]
+    created_at = int(time.time())
+    serialised = json.dumps(
+        [0, "", created_at, KIND_AUTH, tags, content],
+        separators=(",", ":"), ensure_ascii=False)
+    event_id = hashlib.sha256(serialised.encode()).hexdigest()
+    # minipae.sign_event returns a full Nostr event dict
+    return minipae.sign_event(KIND_AUTH, content, tags, seckey)
+
+
+async def subscribe_calls(relay: str, our_pubkey_hex: str,
+                          seckey: bytes | None = None):
+    """Yield kind:1059 gift-wrap events addressed to us, live.
+
+    Handles NIP-42 AUTH challenge if the relay requires it.
+    Raises RuntimeError if relay demands AUTH and no seckey supplied.
+    """
+    from websockets.asyncio.client import connect as ws_connect
+    from websockets.exceptions import ConnectionClosed
+
     filt = {"kinds": [KIND_GIFT_WRAP], "#p": [our_pubkey_hex], "limit": 100}
-    # Include recent history so we don't miss offers sent before subscribe
     filt["since"] = int(time.time()) - 300
     sub_id = "agent-voice-calls"
-    async with websockets.connect(
+
+    async with ws_connect(
         relay, open_timeout=15, max_size=10 * 1024 * 1024,
         ping_interval=20, ping_timeout=20,
     ) as ws:
         await ws.send(json.dumps(["REQ", sub_id, filt]))
         while True:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=None))
-            if msg[0] == "EVENT" and msg[1] == sub_id:
+            raw = await asyncio.wait_for(ws.recv(), timeout=None)
+            msg = json.loads(raw)
+            if msg[0] == "AUTH":
+                challenge = msg[1]
+                if seckey is None:
+                    raise RuntimeError(
+                        f"relay {relay} requires NIP-42 AUTH but no seckey supplied")
+                auth_event = _nip42_event(challenge, relay, seckey)
+                await ws.send(json.dumps(["AUTH", auth_event]))
+                # Wait for OK confirming auth acceptance
+                ok_raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                ok = json.loads(ok_raw)
+                if ok[0] == "OK" and ok[2]:
+                    log.info(f"NIP-42 AUTH accepted by {relay}")
+                    # Re-issue REQ — relay may have dropped the first one
+                    await ws.send(json.dumps(["REQ", sub_id, filt]))
+                else:
+                    log.warning(f"NIP-42 AUTH rejected by {relay}: {ok}")
+            elif msg[0] == "CLOSED":
+                machine_msg = msg[2] if len(msg) > 2 else ""
+                if "auth-required" in machine_msg.lower():
+                    raise RuntimeError(
+                        f"relay {relay} closed sub: auth-required")
+                log.warning(f"relay {relay} closed sub: {machine_msg}")
+                break
+            elif msg[0] == "EVENT" and msg[1] == sub_id:
                 yield msg[2]
             # EOSE / NOTICE: ignore, stay open for live events
 
@@ -58,6 +104,7 @@ class VoiceEndpoint:
     """A sovereign voice endpoint: Nostr in, WebRTC out."""
 
     def __init__(self, identity: "Identity", relays: list[str],
+                 seckey: bytes | None = None,
                  card: dict | None = None, agent_backend: str = "deepseek",
                  agent_system: str | None = None):
         if not HAS_SIGNALING:
@@ -66,6 +113,7 @@ class VoiceEndpoint:
             raise RuntimeError("aiortc is required")
         self.identity = identity
         self.relays = relays
+        self.seckey = seckey
         self.card = card
         self.agent_backend = agent_backend
         self.agent_system = agent_system
@@ -105,7 +153,6 @@ class VoiceEndpoint:
     async def _answer_offer(self, sig, caller_pubkey: bytes) -> None:
         """Set up WebRTC, create answer, publish via Nostr."""
         session = CallSession(self.identity)
-        # on_signal(RINGING) -> None; we then answer explicitly
         session.on_signal(sig, caller_pubkey)
         self.sessions[sig.call_id] = session
 
@@ -151,10 +198,7 @@ class VoiceEndpoint:
         log.info(f"answered call {sig.call_id[:8]}...")
 
     async def _pump_audio(self, track, pipeline) -> None:
-        """Feed inbound audio frames through VAD into the pipeline.
-
-        Adapted from mesh-voice's on_audio_track (same owner).
-        """
+        """Feed inbound audio frames through VAD into the pipeline."""
         from .pipeline import VADSegmenter, VAD_FRAME_BYTES, frame_pcm
         vad = VADSegmenter()
         buf = bytearray()
@@ -175,8 +219,6 @@ class VoiceEndpoint:
             log.info(f"audio track ended ({e})")
 
     async def _add_ice(self, sig) -> None:
-        """Add a trickle ICE candidate (v1 may bundle; this is for completeness)."""
-        # TODO: implement when caller does trickle ICE
         log.debug(f"ICE candidate for {sig.call_id[:8]}... (not yet wired)")
 
     async def _close_call(self, call_id: str) -> None:
@@ -191,8 +233,13 @@ class VoiceEndpoint:
         while self._running:
             try:
                 log.info(f"subscribing to {relay}")
-                async for event in subscribe_calls(relay, self.identity.pubkey_hex):
+                async for event in subscribe_calls(
+                        relay, self.identity.pubkey_hex, self.seckey):
                     await self._handle_event(event)
+            except RuntimeError as e:
+                log.error(f"relay {relay} fatal: {e}; stopping")
+                self._running = False
+                return
             except Exception as e:
                 log.warning(f"relay {relay} error: {e}; reconnecting in 5s")
                 await asyncio.sleep(5)
