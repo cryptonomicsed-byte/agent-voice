@@ -1,0 +1,5 @@
+aiortc>=1.9.0
+# agent-phone is a sibling repo; install from source:
+# pip install git+https://github.com/cryptonomicsed-byte/agent-phone.git
+# (or vendor the signaling module)
+numpy>=1.24.0

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call</title>
+<style>
+  body { font-family: system-ui; text-align: center; padding: 2em; }
+  #callBtn { font-size: 1.5em; padding: 1em 2em; border-radius: 2em; border: none;
+             background: #22c55e; color: white; cursor: pointer; }
+  #callBtn.hangup { background: #ef4444; }
+  #status { margin: 1em; color: #666; }
+</style>
+</head>
+<body>
+<h1 id="bizName">Calling…</h1>
+<div id="status">Tap to call</div>
+<button id="callBtn">📞 Call</button>
+<audio id="remoteAudio" autoplay></audio>
+
+<script type="module">
+// TODO: import nostr-tools from CDN
+// import {generateSecretKey, getPublicKey, ...} from 'nostr-tools'
+// 
+// Flow:
+// 1. Read npub + relays from URL params (?npub=...&relay=...)
+// 2. Generate ephemeral keypair for this call
+// 3. On Call tap: getUserMedia -> create RTCPeerConnection ->
+//    createOffer -> gift-wrap via NIP-17 -> publish to relays
+// 4. Subscribe for gift-wrapped answer -> setRemoteDescription
+// 5. Audio flows P2P. Hangup publishes gift-wrapped hangup.
+const btn = document.getElementById('callBtn');
+const status = document.getElementById('status');
+btn.onclick = () => {
+  status.textContent = 'Nostr signaling + WebRTC wiring goes here (GAP-3)';
+};
+</script>
+</body>
+</html>
