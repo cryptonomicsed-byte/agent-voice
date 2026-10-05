@@ -4,4 +4,3 @@ __pycache__/
 venv/
 *.log
 .env
-src/agent_voice.egg-info

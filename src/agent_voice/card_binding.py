@@ -104,7 +104,7 @@ async def verify_binding(npub_hex: str, expected_hash: str,
     for relay in relays:
         try:
             events = await minipae.query_authenticated(
-                relay, [npub_hex], None, kinds=[0])
+                relay, [npub_hex], None, kinds=[0], limit=1)
             for ev in events or []:
                 try:
                     content = json.loads(ev.get("content", "{}"))
