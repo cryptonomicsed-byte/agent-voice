@@ -5,35 +5,133 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Call</title>
 <style>
-  body { font-family: system-ui; text-align: center; padding: 2em; }
-  #callBtn { font-size: 1.5em; padding: 1em 2em; border-radius: 2em; border: none;
+  body { font-family: system-ui; text-align: center; padding: 2em; max-width: 480px; margin: 0 auto; }
+  #callBtn { font-size: 1.4em; padding: 0.9em 2em; border-radius: 2em; border: none;
              background: #22c55e; color: white; cursor: pointer; }
   #callBtn.hangup { background: #ef4444; }
-  #status { margin: 1em; color: #666; }
+  #callBtn:disabled { background: #999; cursor: default; }
+  #status { margin: 1em; color: #666; min-height: 1.5em; }
+  #bizName { margin-bottom: 0.2em; }
 </style>
 </head>
 <body>
-<h1 id="bizName">Calling…</h1>
+<h1 id="bizName">AI Front Desk</h1>
 <div id="status">Tap to call</div>
 <button id="callBtn">📞 Call</button>
-<audio id="remoteAudio" autoplay></audio>
+<audio id="remoteAudio" autoplay playsinline></audio>
 
+<script type="importmap">
+{ "imports": { "nostr-tools": "https://cdn.jsdelivr.net/npm/nostr-tools@2.10.4/+esm" } }
+</script>
 <script type="module">
-// TODO: import nostr-tools from CDN
-// import {generateSecretKey, getPublicKey, ...} from 'nostr-tools'
-// 
-// Flow:
-// 1. Read npub + relays from URL params (?npub=...&relay=...)
-// 2. Generate ephemeral keypair for this call
-// 3. On Call tap: getUserMedia -> create RTCPeerConnection ->
-//    createOffer -> gift-wrap via NIP-17 -> publish to relays
-// 4. Subscribe for gift-wrapped answer -> setRemoteDescription
-// 5. Audio flows P2P. Hangup publishes gift-wrapped hangup.
-const btn = document.getElementById('callBtn');
+import { generateSecretKey, getPublicKey, finalizeEvent, nip19, nip44, SimplePool } from 'nostr-tools';
+
+const params = new URLSearchParams(location.search);
+const agentNpub = params.get('npub');
+const relayUrls = (params.get('relay') || 'wss://relay.damus.io').split(',');
+const bizName = params.get('name') || 'AI Front Desk';
+document.getElementById('bizName').textContent = bizName;
+
 const status = document.getElementById('status');
-btn.onclick = () => {
-  status.textContent = 'Nostr signaling + WebRTC wiring goes here (GAP-3)';
+const btn = document.getElementById('callBtn');
+const remoteAudio = document.getElementById('remoteAudio');
+const setStatus = t => { status.textContent = t; };
+
+if (!agentNpub) { setStatus('Missing ?npub= in URL'); btn.disabled = true; throw new Error('no npub'); }
+const agentPubkey = nip19.decode(agentNpub).data;
+
+const pool = new SimplePool();
+let pc = null, callId = null, sub = null, hungUp = false;
+const mySeckey = generateSecretKey();
+const myPubkey = getPublicKey(mySeckey);
+
+function giftWrap(plaintext) {
+  const convKey = nip44.v2.utils.getConversationKey(mySeckey, agentPubkey);
+  const ciphertext = nip44.v2.encrypt(plaintext, convKey);
+  return finalizeEvent({
+    kind: 1059,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['p', agentPubkey]],
+    content: ciphertext,
+  }, mySeckey);
+}
+
+async function sendSignal(type, extra = {}) {
+  const signal = JSON.stringify({ type, call_id: callId, ...extra });
+  const ev = giftWrap(signal);
+  await Promise.all(pool.publish(relayUrls, ev));
+}
+
+function decryptSignal(ev) {
+  const convKey = nip44.v2.utils.getConversationKey(mySeckey, ev.pubkey);
+  return JSON.parse(nip44.v2.decrypt(ev.content, convKey));
+}
+
+btn.onclick = async () => {
+  if (pc) { await hangup(); return; }
+  btn.disabled = true;
+  try {
+    setStatus('Getting microphone…');
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    setStatus('Connecting…');
+    callId = [...crypto.getRandomValues(new Uint8Array(8))]
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+
+    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    pc.ontrack = e => { remoteAudio.srcObject = e.streams[0]; };
+    pc.onicecandidate = e => {
+      if (e.candidate) sendSignal('ice', { candidate: e.candidate.toJSON() }).catch(()=>{});
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') setStatus('Connected — you can talk');
+      if (pc.connectionState === 'failed') setStatus('Connection failed');
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await sendSignal('offer', { sdp: offer.sdp });
+    setStatus('Ringing…');
+
+    sub = pool.subscribeMany(relayUrls,
+      [{ kinds: [1059], '#p': [myPubkey], since: Math.floor(Date.now()/1000) - 5 }],
+      { onevent(ev) {
+          let sig;
+          try { sig = decryptSignal(ev); } catch { return; }
+          if (sig.call_id !== callId) return;
+          if (sig.type === 'answer') {
+            pc.setRemoteDescription({ type: 'answer', sdp: sig.sdp }).catch(()=>{});
+          } else if (sig.type === 'ice' && sig.candidate) {
+            pc.addIceCandidate(new RTCIceCandidate(sig.candidate)).catch(()=>{});
+          } else if (sig.type === 'hangup') {
+            cleanup(); setStatus('Call ended');
+          }
+        }});
+
+    btn.disabled = false;
+    btn.textContent = '📴 Hang up';
+    btn.classList.add('hangup');
+  } catch (e) {
+    setStatus('Failed: ' + e.message);
+    btn.disabled = false;
+    cleanup();
+  }
 };
+
+async function hangup() {
+  if (hungUp) return; hungUp = true;
+  try { await sendSignal('hangup', { reason: 'caller hangup' }); } catch {}
+  cleanup(); setStatus('Call ended');
+}
+
+function cleanup() {
+  sub?.close(); sub = null;
+  pc?.close(); pc = null;
+  btn.textContent = '📞 Call';
+  btn.classList.remove('hangup');
+  hungUp = false;
+}
+window.addEventListener('beforeunload', () => { if (pc) sendSignal('hangup', { reason: 'page close' }).catch(()=>{}); });
 </script>
 </body>
 </html>
