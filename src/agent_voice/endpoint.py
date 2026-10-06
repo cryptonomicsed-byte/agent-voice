@@ -156,7 +156,13 @@ class VoiceEndpoint:
         session.on_signal(sig, caller_pubkey)
         self.sessions[sig.call_id] = session
 
-        pc = RTCPeerConnection()
+        from aiortc import RTCConfiguration, RTCIceServer
+        ice_cfg = RTCConfiguration(iceServers=[
+            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urls=["turn:omokoda.duckdns.org:3478"],
+                         username="agent", credential="voice2026"),
+        ])
+        pc = RTCPeerConnection(configuration=ice_cfg)
         self.peer_connections[sig.call_id] = pc
 
         # GAP-4: attach the voice pipeline to the outbound side
