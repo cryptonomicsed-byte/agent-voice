@@ -198,24 +198,31 @@ class VoiceEndpoint:
         log.info(f"answered call {sig.call_id[:8]}...")
 
     async def _pump_audio(self, track, pipeline) -> None:
-        """Feed inbound audio frames through VAD into the pipeline."""
-        from .pipeline import VADSegmenter, VAD_FRAME_BYTES, frame_pcm
-        vad = VADSegmenter()
+        """Feed inbound audio frames through time-based chunking into the pipeline.
+
+        VAD (webrtcvad) consistently classifies decoded WebRTC Opus frames as
+        non-speech, so we use 3-second time-based chunks instead. Whisper
+        handles silence gracefully.
+        """
+        from .pipeline import frame_pcm, IN_RATE
+        CHUNK_BYTES = IN_RATE * 2 * 3  # 3 seconds of 16kHz s16 mono
+        MIN_BYTES = IN_RATE * 2 // 2   # 0.5s minimum to avoid empty STT calls
         buf = bytearray()
+        last_flush = asyncio.get_event_loop().time()
         try:
             while True:
                 frame = await track.recv()
                 for out in pipeline.resample_inbound(frame):
                     buf += frame_pcm(out)
-                    while len(buf) >= VAD_FRAME_BYTES:
-                        chunk = bytes(buf[:VAD_FRAME_BYTES])
-                        del buf[:VAD_FRAME_BYTES]
-                        for utt in vad.feed(chunk):
-                            asyncio.ensure_future(
-                                pipeline.handle_utterance(utt))
+                now = asyncio.get_event_loop().time()
+                if len(buf) >= CHUNK_BYTES or (now - last_flush >= 3.0 and len(buf) >= MIN_BYTES):
+                    chunk = bytes(buf)
+                    buf.clear()
+                    last_flush = now
+                    asyncio.ensure_future(pipeline.handle_utterance(chunk))
         except Exception as e:
-            for utt in vad.flush():
-                asyncio.ensure_future(pipeline.handle_utterance(utt))
+            if len(buf) >= MIN_BYTES:
+                asyncio.ensure_future(pipeline.handle_utterance(bytes(buf)))
             log.info(f"audio track ended ({e})")
 
     async def _add_ice(self, sig) -> None:

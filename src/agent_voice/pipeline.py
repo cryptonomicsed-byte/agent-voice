@@ -124,7 +124,6 @@ class QueueAudioTrack(AudioStreamTrack):
 
     def __init__(self):
         super().__init__()
-        self._queue = asyncio.Queue()
         self._buf = bytearray()
         self._timestamp = 0
 
@@ -135,14 +134,11 @@ class QueueAudioTrack(AudioStreamTrack):
         return len(self._buf) / 2 / OUT_RATE
 
     async def recv(self):
-        while len(self._buf) < OUT_BYTES:
-            try:
-                chunk = self._queue.get_nowait()
-                self._buf += chunk
-            except asyncio.QueueEmpty:
-                await asyncio.sleep(0.005)
-        data = bytes(self._buf[:OUT_BYTES])
-        del self._buf[:OUT_BYTES]
+        if len(self._buf) >= OUT_BYTES:
+            data = bytes(self._buf[:OUT_BYTES])
+            del self._buf[:OUT_BYTES]
+        else:
+            data = b'\x00' * OUT_BYTES  # silence keeps RTP stream alive
         frame = av.AudioFrame(format="s16", layout="mono", samples=OUT_SAMPLES)
         frame.planes[0].update(data)
         frame.sample_rate = OUT_RATE
