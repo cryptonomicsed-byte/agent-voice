@@ -38,59 +38,96 @@ OUT_BYTES = OUT_SAMPLES * 2
 VAD_FRAME_BYTES = IN_RATE * 2 * 30 // 1000
 
 
+import re as _re
+
+def _clean_offering_name(name: str) -> str:
+    """Strip embedded price patterns like '— $4.50' from an offering name.
+
+    The DNA compiler sometimes embeds the price in the name string when no
+    structured price field exists. If the card's price field is null we strip
+    it here so the LLM cannot read the price off the name and confabulate.
+    """
+    return _re.sub(r'\s*[—–-]\s*\$[\d.,]+', '', name).strip()
+
+
 def build_voice_system_prompt(card: dict) -> str:
-    """Compile a concise spoken-style system prompt from a CARD.md dict.
+    """Compile a concise spoken-style system prompt from a card dict.
 
     Includes the explicit null-price refusal rule: if an offering has no
     price in the card, the agent must NOT invent one — it says so and
     offers escalation (the WS5 live-refusal acceptance criterion).
     """
     ident = card.get("identity", {})
+    if isinstance(ident, str):
+        ident = {}
     voice = card.get("voice", {})
+    if isinstance(voice, str):
+        voice = {}
     offerings = card.get("offerings", [])
     policies = card.get("policies", [])
     handoff = card.get("handoff", {})
 
     L = []
-    name = ident.get("name", "this business")
+    name = ident.get("name", "this business") if isinstance(ident, dict) else "this business"
     L.append(f"You are the AI phone agent for **{name}**.")
     L.append("You are on a live voice call. Keep every reply to one or two "
              "short spoken sentences. No lists, no markdown, no emojis.")
-    if voice.get("tone"):
-        L.append(f"Tone: {', '.join(voice['tone'])}.")
-    if voice.get("personality"):
-        L.append(f"Personality: {voice['personality']}")
+    tone = voice.get("tone", []) if isinstance(voice, dict) else []
+    personality = voice.get("personality") if isinstance(voice, dict) else None
+    if tone:
+        L.append(f"Tone: {', '.join(tone) if isinstance(tone, list) else tone}.")
+    if personality:
+        L.append(f"Personality: {personality}")
     L.append("")
     if offerings:
         L.append("What the business offers:")
         for o in offerings:
-            line = f"- {o.get('name')}"
+            if not isinstance(o, dict):
+                continue
+            raw_name = o.get("name") or ""
+            price_field = o.get("price")      # None means explicitly null
+            price_hint = o.get("price_hint")
+            # When the structured price is null, strip any price embedded in
+            # the name so the LLM cannot read it off and confabulate a figure.
+            if price_field is None and price_hint is None:
+                display_name = _clean_offering_name(raw_name)
+                price_tag = " (price: NOT CONFIRMED — do not quote)"
+            elif price_hint is not None:
+                display_name = raw_name
+                price_tag = f" ({price_hint})"
+            else:
+                display_name = raw_name
+                price_tag = f" (${price_field})"
+            line = f"- {display_name}"
             if o.get("description"):
                 line += f" — {o['description']}"
-            price = o.get("price_hint") or o.get("price")
-            if price:
-                line += f" ({price})"
-            else:
-                line += " (price: NOT LISTED)"
+            line += price_tag
             L.append(line)
         L.append("")
-    L.append("PRICE RULE (binding): If a caller asks the price of anything "
-             "marked NOT LISTED above, or anything not listed at all, do NOT "
-             "invent, estimate, or guess a price. Say you don't have that "
-             "price and offer to take their number for a callback.")
+    L.append("PRICE RULE (absolute): If a caller asks the price of anything "
+             "marked 'NOT CONFIRMED' above, or anything not on the list, "
+             "say exactly: \"I don't have that price confirmed right now — "
+             "can I take your number for a callback?\" "
+             "Do NOT guess, estimate, or use any number you think you know. "
+             "Never invent a price under any circumstances.")
     if policies:
         L.append("")
         L.append("Policies:")
         for p in policies:
+            if not isinstance(p, dict):
+                continue
             topic = p.get("topic", "")
             rule = p.get("rule", "")
             L.append(f"- {topic}: {rule}")
-    if handoff:
-        L.append("")
-        L.append(f"If you cannot help, {handoff.get('instruction', 'offer to escalate to a human.')}")
+    if handoff and isinstance(handoff, dict):
+        channel = handoff.get("open_hours") or handoff.get("channel") or handoff.get("instruction")
+        if channel:
+            L.append("")
+            L.append(f"Human handoff: {channel}. "
+                     "If you cannot help or the caller requests a person, offer this.")
     L.append("")
     L.append("If a caller asks about anything not grounded in the above, "
-             "say so honestly and offer to escalate. Never invent facts.")
+             "say so honestly and offer to take their number. Never invent facts.")
     return "\n".join(L)
 
 
