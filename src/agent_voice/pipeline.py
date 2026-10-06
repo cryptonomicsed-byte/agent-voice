@@ -122,6 +122,32 @@ def decode_to_pcm48(data: bytes) -> bytes:
     return bytes(out)
 
 
+# RMS energy below which a 16 kHz s16 chunk is treated as silence. Without this
+# gate the pipeline transcribes every 3 s chunk forever: Whisper hallucinates on
+# silence ("You"), the agent replies to nothing, and the CPU stays pinned so the
+# RTP sender starves (choppy/cutting audio).
+SILENCE_RMS = float(os.environ.get("AGENT_VOICE_SILENCE_RMS", "300"))
+
+
+def rms16(pcm: bytes) -> float:
+    """RMS amplitude of little-endian s16 mono PCM (0 for empty input)."""
+    n = len(pcm) // 2
+    if n == 0:
+        return 0.0
+    try:
+        import numpy as np
+        a = np.frombuffer(pcm[: n * 2], dtype="<i2").astype("f4")
+        return float(np.sqrt(np.mean(a * a)))
+    except Exception:
+        import array
+        a = array.array("h")
+        a.frombytes(pcm[: n * 2])
+        acc = 0
+        for v in a:
+            acc += v * v
+        return (acc / n) ** 0.5
+
+
 class QueueAudioTrack(AudioStreamTrack):
     """Outbound WebRTC audio: PCM bytes queued, packetized at 20ms."""
 
@@ -305,6 +331,10 @@ class VoicePipeline:
         async with self._lock:
             if len(pcm16k) < IN_RATE * 2 * 0.5:
                 return
+            level = rms16(pcm16k)
+            if level < SILENCE_RMS:
+                log.debug(f"[{self.bot_name}] skip silence chunk (rms={level:.0f})")
+                return
             if self.outbound.queued_seconds() > 2.0:
                 log.info(f"[{self.bot_name}] dropping utterance (speaking)")
                 return
@@ -317,7 +347,7 @@ class VoicePipeline:
                 return
             if not text:
                 return
-            log.info(f"[{self.bot_name}] heard: {text}")
+            log.info(f"[{self.bot_name}] heard: {text} (rms={level:.0f})")
             try:
                 reply = await loop.run_in_executor(None, self.agent.reply, text)
             except Exception as e:
