@@ -333,6 +333,15 @@ class VoicePipeline:
     def resample_inbound(self, frame) -> list:
         return self._resampler.resample(frame)
 
+    async def greet(self, text: str | None = None) -> None:
+        msg = text or f"Hello, this is {self.bot_name}. How can I help you today?"
+        try:
+            pcm48 = await self.tts.synth(msg)
+            self.outbound.put_pcm(pcm48)
+            log.info(f"[{self.bot_name}] greet: {msg}")
+        except Exception as e:
+            log.warning(f"[{self.bot_name}] greet TTS failed: {e}")
+
     async def handle_utterance(self, pcm16k: bytes):
         async with self._lock:
             if len(pcm16k) < IN_RATE * 2 * 0.5:

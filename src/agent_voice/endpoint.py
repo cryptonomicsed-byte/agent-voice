@@ -159,8 +159,6 @@ class VoiceEndpoint:
         from aiortc import RTCConfiguration, RTCIceServer
         ice_cfg = RTCConfiguration(iceServers=[
             RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-            RTCIceServer(urls=["turn:omokoda.duckdns.org:3478"],
-                         username="agent", credential="voice2026"),
         ])
         pc = RTCPeerConnection(configuration=ice_cfg)
         self.peer_connections[sig.call_id] = pc
@@ -249,7 +247,27 @@ class VoiceEndpoint:
             log.info(f"audio track ended ({e})")
 
     async def _add_ice(self, sig) -> None:
-        log.debug(f"ICE candidate for {sig.call_id[:8]}... (not yet wired)")
+        pc = self.peer_connections.get(sig.call_id)
+        if pc is None:
+            return
+        try:
+            from aiortc.sdp import candidate_from_sdp
+            cand_json = getattr(sig, "candidate", None)
+            if not cand_json:
+                return
+            if isinstance(cand_json, str):
+                cand_json = json.loads(cand_json)
+            cand_str = cand_json.get("candidate", "")
+            if not cand_str:
+                return
+            # candidate_from_sdp expects the part after "candidate:"
+            cand = candidate_from_sdp(cand_str.split(":", 1)[-1])
+            cand.sdpMid = cand_json.get("sdpMid")
+            cand.sdpMLineIndex = cand_json.get("sdpMLineIndex")
+            await pc.addIceCandidate(cand)
+            log.debug(f"ICE candidate added for {sig.call_id[:8]}...")
+        except Exception as e:
+            log.warning(f"addIceCandidate failed for {sig.call_id[:8]}: {e}")
 
     async def _close_call(self, call_id: str) -> None:
         pc = self.peer_connections.pop(call_id, None)
