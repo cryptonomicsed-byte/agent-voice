@@ -15,9 +15,13 @@ model = "deepseek-chat"
 
 [risk_profiles.default]
 level = "supervised"
-# Recommended: lock the tool surface before granting Helix real capabilities
-# require_approval_for_medium_risk = true
-# allowed_commands = ["git", "ls", "cat"]
+workspace_only = true
+require_approval_for_medium_risk = true
+block_high_risk_commands = true
+allowed_commands = [
+  "git", "ls", "cat", "grep", "find", "echo", "pwd",
+  "head", "tail", "wc", "date", "uname", "uptime",
+]
 
 [agents.helix]
 system_prompt = "You are Helix, a sovereign AI agent on the HelixMain network. You communicate via Nostr DMs. Be concise and helpful."
