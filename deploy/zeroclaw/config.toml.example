@@ -15,6 +15,11 @@ model = "deepseek-chat"
 
 [risk_profiles.default]
 level = "supervised"
+# Chat agent, not a task agent: deny the entire tool surface (built-in AND
+# MCP-discovered). Note: an empty allowed_tools = [] is legacy-UNRESTRICTED,
+# so deny_all_tools is the explicit lever. Replying over Nostr is delivered by
+# the channel, not a tool, so this does not break chat — verified live.
+deny_all_tools = true
 # Real OS-level sandbox for tool execution. "auto" falls back to none on this
 # build (it ships without the sandbox-landlock / sandbox-bubblewrap cargo
 # features), so pin the docker backend explicitly — docker is present on the box.
