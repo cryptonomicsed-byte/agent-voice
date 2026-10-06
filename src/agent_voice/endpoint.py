@@ -184,7 +184,13 @@ class VoiceEndpoint:
         _greeted = {"done": False}
 
         async def _greet_once():
-            """Speak as soon as media is up, so the caller knows we connected."""
+            """Speak once media is actually up.
+
+            MUST be driven by connectionState == 'connected'. on_track fires when
+            the offer SDP arrives, which can be seconds before ICE/DTLS complete;
+            queueing the greeting then drains it into a dead transport by the time
+            media starts, so the caller hears a fragment or nothing.
+            """
             if _greeted["done"] or pipeline is None:
                 return
             _greeted["done"] = True
@@ -196,7 +202,6 @@ class VoiceEndpoint:
             if track.kind == "audio" and pipeline is not None:
                 asyncio.ensure_future(
                     self._pump_audio(track, pipeline))
-                asyncio.ensure_future(_greet_once())
 
         @pc.on("connectionstatechange")
         async def on_state():
