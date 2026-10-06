@@ -1,0 +1,47 @@
+schema_version = 3
+
+# Deploy to /etc/zeroclaw/config.toml on the VPS.
+# Replace all ${...} placeholders with real values — never commit the live file.
+#
+# Start daemon: systemctl start zeroclaw
+# Pair client:  POST /pair  X-Pairing-Code: <code from journalctl -u zeroclaw>
+# Trace logs:   /etc/zeroclaw/data/state/runtime-trace.jsonl  (NOT journald)
+
+[providers.models.openai.deepseek]
+kind = "openai-compatible"
+uri = "https://api.deepseek.com/v1"
+api_key = "${DEEPSEEK_API_KEY}"
+model = "deepseek-chat"
+
+[risk_profiles.default]
+level = "supervised"
+# Recommended: lock the tool surface before granting Helix real capabilities
+# require_approval_for_medium_risk = true
+# allowed_commands = ["git", "ls", "cat"]
+
+[agents.helix]
+system_prompt = "You are Helix, a sovereign AI agent on the HelixMain network. You communicate via Nostr DMs. Be concise and helpful."
+model_provider = "openai.deepseek"
+channels = ["nostr.helix"]
+risk_profile = "default"
+
+[channels.nostr.helix]
+enabled = true
+private_key = "${HELIX_NOSTR_SK_HEX}"   # hex 32-byte secp256k1 secret key
+relays = ["wss://omokoda.duckdns.org:3443"]
+
+[peer_groups.helix_trusted]
+channel = "nostr.helix"
+agents = ["helix"]
+# Allowlist of hex pubkeys permitted to DM Helix.
+# agent-voice endpoint pubkey is required; derive with:
+#   /opt/agent-voice-venv/bin/python3 -c "import minipae; sk=open('/var/lib/agent-voice/seckey').read().strip(); print(minipae.pubkey_from_secret(int(sk,16)).hex())"
+# HTTP surface (127.0.0.1:42617) is loopback-only — the allowlist is the only
+# network door. Fails closed on any unlisted pubkey. Do NOT set ["*"] if Helix
+# has tools configured — supervised mode still allows low/medium risk commands.
+external_peers = [
+  "${AGENT_VOICE_PUBKEY_HEX}",
+]
+
+[security.audit]
+enabled = true
