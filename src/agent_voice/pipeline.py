@@ -332,8 +332,10 @@ class VoicePipeline:
             if len(pcm16k) < IN_RATE * 2 * 0.5:
                 return
             level = rms16(pcm16k)
+            log.info(f"[{self.bot_name}] chunk {len(pcm16k)}B rms={level:.0f} "
+                     f"(gate={SILENCE_RMS:.0f})")
             if level < SILENCE_RMS:
-                log.debug(f"[{self.bot_name}] skip silence chunk (rms={level:.0f})")
+                log.info(f"[{self.bot_name}] skip silence chunk (rms={level:.0f})")
                 return
             if self.outbound.queued_seconds() > 2.0:
                 log.info(f"[{self.bot_name}] dropping utterance (speaking)")
