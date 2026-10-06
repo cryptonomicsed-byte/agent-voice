@@ -15,6 +15,11 @@ model = "deepseek-chat"
 
 [risk_profiles.default]
 level = "supervised"
+# Real OS-level sandbox for tool execution. "auto" falls back to none on this
+# build (it ships without the sandbox-landlock / sandbox-bubblewrap cargo
+# features), so pin the docker backend explicitly — docker is present on the box.
+sandbox_enabled = true
+sandbox_backend = "docker"
 workspace_only = true
 require_approval_for_medium_risk = true
 block_high_risk_commands = true
