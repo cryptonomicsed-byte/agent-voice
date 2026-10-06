@@ -181,16 +181,28 @@ class VoiceEndpoint:
         except ImportError as e:
             log.warning(f"pipeline unavailable: {e}")
 
+        _greeted = {"done": False}
+
+        async def _greet_once():
+            """Speak as soon as media is up, so the caller knows we connected."""
+            if _greeted["done"] or pipeline is None:
+                return
+            _greeted["done"] = True
+            await pipeline.greet()
+
         @pc.on("track")
         def on_track(track):
             log.info(f"audio track live: {track.kind}")
             if track.kind == "audio" and pipeline is not None:
                 asyncio.ensure_future(
                     self._pump_audio(track, pipeline))
+                asyncio.ensure_future(_greet_once())
 
         @pc.on("connectionstatechange")
         async def on_state():
             log.info(f"call {sig.call_id[:8]}: {pc.connectionState}")
+            if pc.connectionState == "connected":
+                asyncio.ensure_future(_greet_once())
             if pc.connectionState in ("failed", "closed"):
                 await self._close_call(sig.call_id)
 

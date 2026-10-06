@@ -128,6 +128,12 @@ def decode_to_pcm48(data: bytes) -> bytes:
 # RTP sender starves (choppy/cutting audio).
 SILENCE_RMS = float(os.environ.get("AGENT_VOICE_SILENCE_RMS", "300"))
 
+# Spoken the moment a call connects, so the caller knows the agent is live
+# (and it doubles as an end-to-end test of the outbound audio path).
+GREETING = os.environ.get(
+    "AGENT_VOICE_GREETING",
+    "Hi, you're connected to the voice agent. Go ahead and talk to me.")
+
 
 def rms16(pcm: bytes) -> float:
     """RMS amplitude of little-endian s16 mono PCM (0 for empty input)."""
@@ -364,3 +370,16 @@ class VoicePipeline:
                 log.warning(f"[{self.bot_name}] TTS failed: {e}")
                 return
             self.outbound.put_pcm(pcm48)
+
+    async def greet(self, text: str | None = None) -> None:
+        """Speak on connect so the caller knows the agent is live."""
+        msg = (text or GREETING).strip()
+        if not msg:
+            return
+        try:
+            pcm48 = await self.tts.synth(msg)
+        except Exception as e:
+            log.warning(f"[{self.bot_name}] greeting TTS failed: {e}")
+            return
+        self.outbound.put_pcm(pcm48)
+        log.info(f"[{self.bot_name}] greets: {msg}")
