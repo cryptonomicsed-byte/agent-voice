@@ -103,7 +103,10 @@ def make_resampler(rate=IN_RATE):
 
 
 def frame_pcm(frame) -> bytes:
-    return bytes(frame.planes[0])
+    # planes[0] is an aligned/padded buffer — slice to the real s16 samples.
+    # Without this every frame appends ~128 bytes of junk, corrupting both the
+    # STT input (-> hallucinations) and the TTS output (-> distorted audio).
+    return bytes(frame.planes[0])[:frame.samples * 2]
 
 
 def decode_to_pcm48(data: bytes) -> bytes:
@@ -113,7 +116,9 @@ def decode_to_pcm48(data: bytes) -> bytes:
     out = bytearray()
     for av_frame in container.decode(audio=0):
         for frame in resampler.resample(av_frame):
-            out += bytes(frame.planes[0])
+            out += bytes(frame.planes[0])[:frame.samples * 2]
+    for frame in resampler.resample(None):          # flush the resampler tail
+        out += bytes(frame.planes[0])[:frame.samples * 2]
     return bytes(out)
 
 
