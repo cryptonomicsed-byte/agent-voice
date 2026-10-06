@@ -17,6 +17,7 @@ import fractions
 import io
 import logging
 import os
+import time
 import wave
 
 log = logging.getLogger(__name__)
@@ -163,6 +164,7 @@ class QueueAudioTrack(AudioStreamTrack):
         super().__init__()
         self._buf = bytearray()
         self._timestamp = 0
+        self._start: float | None = None
 
     def put_pcm(self, pcm: bytes):
         self._buf += pcm
@@ -171,6 +173,19 @@ class QueueAudioTrack(AudioStreamTrack):
         return len(self._buf) / 2 / OUT_RATE
 
     async def recv(self):
+        # Pace to real time. aiortc's base AudioStreamTrack does this; a custom
+        # override that omits it lets the RTP sender blast the whole buffer at
+        # wire speed, so timestamps race far ahead of the wall clock and the
+        # browser plays the first ~200ms then stalls ("Hi" and nothing else).
+        if self._start is None:
+            self._start = time.time()
+            self._timestamp = 0
+        else:
+            self._timestamp += OUT_SAMPLES
+            wait = self._start + (self._timestamp / OUT_RATE) - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+
         if len(self._buf) >= OUT_BYTES:
             data = bytes(self._buf[:OUT_BYTES])
             del self._buf[:OUT_BYTES]
@@ -181,7 +196,6 @@ class QueueAudioTrack(AudioStreamTrack):
         frame.sample_rate = OUT_RATE
         frame.pts = self._timestamp
         frame.time_base = fractions.Fraction(1, OUT_RATE)
-        self._timestamp += OUT_SAMPLES
         return frame
 
 
