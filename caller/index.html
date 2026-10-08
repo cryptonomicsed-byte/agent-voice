@@ -59,7 +59,7 @@ function giftWrap(plaintext) {
 async function sendSignal(type, extra = {}) {
   const signal = JSON.stringify({ type, call_id: callId, ...extra });
   const ev = giftWrap(signal);
-  await Promise.all(pool.publish(relayUrls, ev));
+  await Promise.allSettled(pool.publish(relayUrls, ev));
 }
 
 function decryptSignal(ev) {
@@ -73,7 +73,7 @@ btn.onclick = async () => {
   try {
     setStatus('Getting microphone…');
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    setStatus('Connecting…');
+    setStatus('Got mic…');
     callId = [...crypto.getRandomValues(new Uint8Array(8))]
       .map(b => b.toString(16).padStart(2, '0')).join('');
 
@@ -83,7 +83,7 @@ btn.onclick = async () => {
       (Array.isArray(c.urls) ? c.urls : [c.urls]).forEach(u =>
         iceServers.push({ urls: u, username: c.username, credential: c.credential }));
     } catch (e) { console.warn('TURN creds fetch failed, STUN-only:', e); }
-    pc = new RTCPeerConnection({ iceServers });
+    setStatus('Creating peer connection…'); pc = new RTCPeerConnection({ iceServers });
     stream.getTracks().forEach(t => pc.addTrack(t, stream));
     pc.ontrack = e => { remoteAudio.srcObject = e.streams[0]; };
     pc.onicecandidate = e => {
@@ -94,9 +94,9 @@ btn.onclick = async () => {
       if (pc.connectionState === 'failed') setStatus('Connection failed');
     };
 
-    const offer = await pc.createOffer();
+    setStatus('Creating offer…'); const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    await sendSignal('offer', { sdp: offer.sdp });
+    setStatus('Sending offer…'); await sendSignal('offer', { sdp: offer.sdp });
     setStatus('Ringing…');
 
     sub = pool.subscribeMany(relayUrls,
@@ -118,7 +118,7 @@ btn.onclick = async () => {
     btn.textContent = '📴 Hang up';
     btn.classList.add('hangup');
   } catch (e) {
-    setStatus('Failed: ' + e.message);
+    setStatus('Failed: ' + (e?.message ?? e?.toString() ?? JSON.stringify(e))); console.error('call error', e);
     btn.disabled = false;
     cleanup();
   }

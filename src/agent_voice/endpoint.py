@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 try:
     from agent_phone import Identity, SignalType, parse_signal
-    from agent_phone.signaling import CallSession
+    from agent_phone.signaling import CallSession, build_ice
     import minipae
     HAS_SIGNALING = True
 except ImportError:
@@ -157,11 +157,43 @@ class VoiceEndpoint:
         self.sessions[sig.call_id] = session
 
         from aiortc import RTCConfiguration, RTCIceServer
+        import urllib.request as _ur, json as _json
+        def _turn_servers():
+            try:
+                with _ur.urlopen("http://127.0.0.1:8788/turn-creds", timeout=2) as _r:
+                    _d = _json.loads(_r.read())
+                return [RTCIceServer(urls=_d["urls"], username=_d["username"], credential=_d["credential"])]
+            except Exception:
+                return []
         ice_cfg = RTCConfiguration(iceServers=[
             RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+            *_turn_servers(),
         ])
         pc = RTCPeerConnection(configuration=ice_cfg)
         self.peer_connections[sig.call_id] = pc
+
+        @pc.on("icecandidate")
+        def on_icecandidate(candidate):
+            """Trickle OUR candidates back to the caller.
+
+            Without this the caller only ever sees the candidate set embedded in
+            the answer SDP (usually empty/early host candidates). The endpoint's
+            real candidates — including the TURN relayed ones gathered seconds
+            later — are never signalled, so the caller's ICE never completes and
+            the call rings forever.
+            """
+            if candidate is None:
+                return
+            try:
+                payload = {
+                    "candidate": "candidate:" + candidate.to_sdp(),
+                    "sdpMid": candidate.sdpMid,
+                    "sdpMLineIndex": candidate.sdpMLineIndex,
+                }
+                ev = build_ice(self.identity, caller_pubkey, sig.call_id, payload)
+                asyncio.ensure_future(self._publish(ev))
+            except Exception as e:
+                log.warning(f"publish ice candidate failed for {sig.call_id[:8]}: {e}")
 
         # GAP-4: attach the voice pipeline to the outbound side
         pipeline = None
