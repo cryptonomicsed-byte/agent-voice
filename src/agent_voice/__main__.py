@@ -44,6 +44,56 @@ def _load_or_create_seckey(state_dir: Path) -> bytes:
     return sk
 
 
+# ---------------------------------------------------------------------------
+# Card format compatibility table
+#
+# A card is labelled by its `format` key. In CARD.md it lives in the YAML
+# frontmatter; the compiled machine view (card.json) does NOT carry it, so the
+# production voice path — which loads card.json — cannot be validated by the
+# format string alone. We therefore:
+#   * reject, fail closed, when the format is PRESENT and unsupported, and
+#   * warn loudly when it is ABSENT (the card.json case), so the gap shows up
+#     in the log rather than silently grounding calls on an unlabelled card.
+#
+# helixmain emits `business-card/0.1` (decision A: 0.1 stays the production
+# format until 0.2 is implemented end-to-end). Upstream card-protocol is at
+# `business-card/0.2` (Tier Annex) — a known format this agent does not ground
+# on yet. See agent-os/contracts/card-format-compatibility.md.
+# ---------------------------------------------------------------------------
+CARD_FORMAT_CURRENT = "business-card/0.1"
+CARD_FORMAT_SUPPORTED = frozenset({CARD_FORMAT_CURRENT})
+CARD_FORMAT_KNOWN_UNSUPPORTED = frozenset({"business-card/0.2"})
+
+
+def validate_card_format(card: dict, card_path: str = "<card>") -> str | None:
+    """Validate a loaded card's `format` field.
+
+    Returns the format string when present. Raises ValueError on a
+    present-but-unsupported format (fail closed). Returns None and logs a loud
+    warning when the format is absent.
+    """
+    fmt = card.get("format")
+    if fmt is None:
+        log.warning(
+            "card %s carries no `format` field — cannot confirm it is a "
+            "supported version (%s). Grounding on it anyway; compile the card "
+            "with the helixmain compiler so its CARD.md is labelled.",
+            card_path, ", ".join(sorted(CARD_FORMAT_SUPPORTED)))
+        return None
+    if fmt in CARD_FORMAT_SUPPORTED:
+        return fmt
+    if fmt in CARD_FORMAT_KNOWN_UNSUPPORTED:
+        raise ValueError(
+            f"card at {card_path} declares format '{fmt}', a known upstream "
+            f"format this voice agent does not support yet (supports: "
+            f"{', '.join(sorted(CARD_FORMAT_SUPPORTED))}). Refusing to load — a "
+            "mismatch would ground calls on fields the agent cannot interpret. "
+            "See agent-os/contracts/card-format-compatibility.md.")
+    raise ValueError(
+        f"card at {card_path} declares unknown format '{fmt}'. Supported: "
+        f"{', '.join(sorted(CARD_FORMAT_SUPPORTED))}. Refusing to load.")
+
+
 def _load_card(card_path: str) -> dict:
     """Load a card from either a .json file or a CARD.md file.
 
@@ -51,21 +101,27 @@ def _load_card(card_path: str) -> dict:
     .md    — YAML frontmatter only (id/hash/status); no offerings/voice, so
              the resulting system prompt will be generic. Use .json for a
              fully-grounded agent.
+
+    Either way the card's `format` is validated (fail closed on a present but
+    unsupported format; warn when absent) — see validate_card_format.
     """
     if card_path.endswith(".json"):
         with open(card_path) as f:
-            return json.load(f)
-    # CARD.md path
-    try:
-        import yaml
-    except ImportError:
-        raise RuntimeError("pyyaml required to load CARD.md — use a .json card instead")
-    with open(card_path) as f:
-        text = f.read()
-    if not text.startswith("---"):
-        raise ValueError(f"CARD.md at {card_path} has no YAML frontmatter")
-    _, fm, _ = text.split("---", 2)
-    return yaml.safe_load(fm)
+            card = json.load(f)
+    else:
+        # CARD.md path
+        try:
+            import yaml
+        except ImportError:
+            raise RuntimeError("pyyaml required to load CARD.md — use a .json card instead")
+        with open(card_path) as f:
+            text = f.read()
+        if not text.startswith("---"):
+            raise ValueError(f"CARD.md at {card_path} has no YAML frontmatter")
+        _, fm, _ = text.split("---", 2)
+        card = yaml.safe_load(fm)
+    validate_card_format(card or {}, card_path)
+    return card
 
 
 async def _main() -> int:
