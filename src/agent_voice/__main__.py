@@ -158,8 +158,24 @@ async def _main() -> int:
                  len(card.get("offerings", [])) if has_offerings else "none (md frontmatter only)")
 
     backend = os.environ.get("AGENT_VOICE_BACKEND", "deepseek")
+
+    # Per-card memory: bind this card to its own mem/card/<id>/ namespace so
+    # calls accumulate context. Optional — an unset/unreachable substrate just
+    # means the agent has no memory, never a failure to answer.
+    card_memory = None
+    if card:
+        from .card_memory import CardMemory, card_id_for
+        cid = card_id_for(card)
+        if cid:
+            card_memory = CardMemory(cid)
+            log.info("card memory namespace: mem/card/%s/ (ready=%s)",
+                     cid, card_memory.available())
+        else:
+            log.warning("card has no id/organization_id — per-card memory disabled")
+
     ep = VoiceEndpoint(identity, relays, seckey=identity.seckey,
-                       card=card, agent_backend=backend)
+                       card=card, agent_backend=backend,
+                       card_memory=card_memory)
 
     log.info("relays: %s | backend: %s | card: %s", relays, backend, card_path or "(none)")
     try:

@@ -106,7 +106,8 @@ class VoiceEndpoint:
     def __init__(self, identity: "Identity", relays: list[str],
                  seckey: bytes | None = None,
                  card: dict | None = None, agent_backend: str = "deepseek",
-                 agent_system: str | None = None):
+                 agent_system: str | None = None,
+                 card_memory=None):
         if not HAS_SIGNALING:
             raise RuntimeError("agent-phone + minipae are required")
         if not HAS_AIORTC:
@@ -117,9 +118,22 @@ class VoiceEndpoint:
         self.card = card
         self.agent_backend = agent_backend
         self.agent_system = agent_system
+        # Per-card memory (mem/card/<id>/*). Optional; None disables it.
+        self.card_memory = card_memory
+        self._call_started: dict[str, float] = {}
         self.sessions: dict[str, CallSession] = {}
         self.peer_connections: dict[str, RTCPeerConnection] = {}
         self._running = False
+
+    def _load_card_memory(self) -> dict:
+        """Load this card's remembered entries. Never raises, never blocks a call."""
+        if self.card_memory is None:
+            return {}
+        try:
+            return self.card_memory.load() or {}
+        except Exception as e:
+            log.warning(f"card memory load failed: {e}")
+            return {}
 
     async def _publish(self, event: dict) -> None:
         """Publish a signed event to all relays."""
@@ -155,6 +169,7 @@ class VoiceEndpoint:
         session = CallSession(self.identity)
         session.on_signal(sig, caller_pubkey)
         self.sessions[sig.call_id] = session
+        self._call_started[sig.call_id] = time.time()
 
         from aiortc import RTCConfiguration, RTCIceServer
         import urllib.request as _ur, json as _json
@@ -203,10 +218,19 @@ class VoiceEndpoint:
                                    frame_pcm)
             outbound = QueueAudioTrack()
             pc.addTrack(outbound)
+            # Per-card memory: ground this call in what earlier calls taught
+            # this business's agent (mem/card/<id>/*). Best-effort — a memory
+            # outage must not stop the call.
+            card = self.card
+            memory = self._load_card_memory()
+            if memory:
+                card = dict(self.card or {})
+                card["memory"] = memory
+                log.info("card memory: %d entr(ies) loaded for this call", len(memory))
             pipeline = VoicePipeline(
                 self.identity.npub[:16], outbound,
                 agent_backend=self.agent_backend,
-                card=self.card, agent_system=self.agent_system)
+                card=card, agent_system=self.agent_system)
             log.info(f"voice pipeline attached for {sig.call_id[:8]}...")
         except ImportError as e:
             log.warning(f"pipeline unavailable: {e}")
@@ -306,7 +330,18 @@ class VoiceEndpoint:
         if pc:
             await pc.close()
         self.sessions.pop(call_id, None)
+        started = self._call_started.pop(call_id, None)
         log.info(f"call {call_id[:8]}... closed")
+        # Write one bounded learning so this card's agent accumulates call
+        # history at mem/card/<id>/learnings. Best-effort: a memory outage must
+        # never surface as a call error.
+        if self.card_memory is not None:
+            try:
+                dur = int(time.time() - started) if started else 0
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                self.card_memory.append_learning(f"{stamp} call {call_id[:8]} ({dur}s)")
+            except Exception as e:
+                log.warning(f"card memory write failed for {call_id[:8]}: {e}")
 
     async def _relay_loop(self, relay: str) -> None:
         """Subscribe to one relay; reconnect on failure."""
