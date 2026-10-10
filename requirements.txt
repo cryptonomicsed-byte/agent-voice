@@ -1,7 +1,20 @@
+# agent-voice runtime dependencies.
+#
+# Sibling repos are PINNED TO A COMMIT, never a floating branch. A voice agent
+# whose signalling or memory behaviour can change under it on `pip install` is
+# a voice agent nobody can reproduce a bug against. Bump deliberately and
+# record the bump in ../REPOS.md.
+#
+# Two supported install modes (see ../REPOS.md):
+#   1. Fresh install:  pip install -r requirements.txt        (pinned git refs)
+#   2. Live host:      sibling checkouts at /opt/<repo>, exposed to the venv by
+#                      site-packages/agent_voice_deps.pth. There the "install"
+#                      is a `git pull` per repo, then a service restart.
 aiortc>=1.9.0
 websockets>=14.0
 pyyaml>=6.0
-# agent-phone is a sibling repo; install from source:
-# pip install git+https://github.com/cryptonomicsed-byte/agent-phone.git
-# (or vendor the signaling module)
 numpy>=1.24.0
+
+# Sibling repos, pinned.
+agent-phone @ git+https://github.com/cryptonomicsed-byte/agent-phone.git@39d91960ba70c0be2da9bab6c271530d896a9507
+minipae     @ git+https://github.com/cryptonomicsed-byte/minipae.git@99eb98bf9fa4e679067f512d1e2595557cfc574a
