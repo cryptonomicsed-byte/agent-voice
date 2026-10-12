@@ -176,11 +176,15 @@ async def _main() -> int:
     # Pre-warm STT + TTS so the FIRST call is not the one paying the model load.
     # Both are process-global caches, so this is a one-time startup cost.
     try:
-        from .pipeline import Transcriber
+        from .pipeline import (Transcriber, _GREETING_PCM, _ENV_GREETING,
+                               GREETING, opening_line)
         Transcriber(os.environ.get("AGENT_VOICE_STT_MODEL", "base"))._load()
         from .tts import make_synthesizer
-        make_synthesizer()
-        log.info("prewarmed STT + TTS")
+        _synth = make_synthesizer()
+        _line = _ENV_GREETING or opening_line(card or {}) or GREETING
+        if _line and _line not in _GREETING_PCM:
+            _GREETING_PCM[_line] = await _synth.synth(_line)
+        log.info("prewarmed STT + TTS + greeting")
     except Exception as e:  # never fail startup over a warm-up
         log.warning("prewarm skipped: %s", e)
 

@@ -52,6 +52,31 @@ def _clean_offering_name(name: str) -> str:
     return _re.sub(r'\s*[—–-]\s*\$[\d.,]+', '', name).strip()
 
 
+def opening_line(card: dict) -> str | None:
+    """A greeting built from THIS card, so the opening names the business and what
+    it does instead of the stock 'connected to the voice agent' line."""
+    if not isinstance(card, dict):
+        card = {}
+    ident = card.get("identity") or {}
+    if not isinstance(ident, dict):
+        ident = {}
+    name = str(ident.get("name") or "").strip()
+    if not name:
+        return None
+    parts = [f"Thanks for calling {name}!"]
+    tagline = str(ident.get("tagline") or ident.get("elevator_pitch") or "").strip()
+    if tagline:
+        parts.append(tagline.rstrip(".") + ".")
+    names = [_clean_offering_name(str(o.get("name")))
+             for o in (card.get("offerings") or [])
+             if isinstance(o, dict) and o.get("name")]
+    names = [n for n in names if n]
+    if names:
+        parts.append("We can help with " + ", ".join(names[:3]) + ".")
+    parts.append("How can I help you today?")
+    return " ".join(parts)
+
+
 def build_voice_system_prompt(card: dict) -> str:
     """Compile a concise spoken-style system prompt from a card dict.
 
@@ -188,6 +213,11 @@ SILENCE_RMS = float(os.environ.get("AGENT_VOICE_SILENCE_RMS", "300"))
 _ENV_GREETING = os.environ.get("AGENT_VOICE_GREETING")
 GREETING = _ENV_GREETING or (
     "Hi, you're connected to the voice agent. Go ahead and talk to me.")
+
+# Greeting PCM, cached per line. Pre-synthesized at startup so the first caller
+# hears it the instant media is up — the first Piper inference on this CPU costs
+# a couple of seconds (ONNX warmup), which is dead air if it lands on the call.
+_GREETING_PCM: dict = {}
 
 
 def rms16(pcm: bytes) -> float:
@@ -457,26 +487,7 @@ class VoicePipeline:
             self.outbound.put_pcm(pcm48)
 
     def _opening_line(self) -> str | None:
-        """A greeting built from THIS card, so the opening names the business and
-        what it does instead of the stock 'connected to the voice agent' line."""
-        ident = self.card.get("identity") or {}
-        if not isinstance(ident, dict):
-            ident = {}
-        name = str(ident.get("name") or "").strip()
-        if not name:
-            return None
-        parts = [f"Thanks for calling {name}!"]
-        tagline = str(ident.get("tagline") or ident.get("elevator_pitch") or "").strip()
-        if tagline:
-            parts.append(tagline.rstrip(".") + ".")
-        names = [_clean_offering_name(str(o.get("name")))
-                 for o in (self.card.get("offerings") or [])
-                 if isinstance(o, dict) and o.get("name")]
-        names = [n for n in names if n]
-        if names:
-            parts.append("We can help with " + ", ".join(names[:3]) + ".")
-        parts.append("How can I help you today?")
-        return " ".join(parts)
+        return opening_line(self.card)
 
     async def greet(self, text: str | None = None) -> None:
         """Speak on connect so the caller knows the agent is live."""
@@ -484,7 +495,10 @@ class VoicePipeline:
         if not msg:
             return
         try:
-            pcm48 = await self.tts.synth(msg)
+            pcm48 = _GREETING_PCM.get(msg)
+            if pcm48 is None:
+                pcm48 = await self.tts.synth(msg)
+                _GREETING_PCM[msg] = pcm48
         except Exception as e:
             log.warning(f"[{self.bot_name}] greeting TTS failed: {e}")
             return
