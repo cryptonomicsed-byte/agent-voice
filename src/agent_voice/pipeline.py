@@ -185,8 +185,8 @@ SILENCE_RMS = float(os.environ.get("AGENT_VOICE_SILENCE_RMS", "300"))
 
 # Spoken the moment a call connects, so the caller knows the agent is live
 # (and it doubles as an end-to-end test of the outbound audio path).
-GREETING = os.environ.get(
-    "AGENT_VOICE_GREETING",
+_ENV_GREETING = os.environ.get("AGENT_VOICE_GREETING")
+GREETING = _ENV_GREETING or (
     "Hi, you're connected to the voice agent. Go ahead and talk to me.")
 
 
@@ -308,14 +308,22 @@ class VADSegmenter:
         return []
 
 
+# Load Whisper ONCE per process: a fresh VoicePipeline (hence Transcriber) is
+# built for every call, so without this the model reloads on every call.
+_STT_CACHE: dict = {}
+
+
 class Transcriber:
     def __init__(self, model="base"):
-        self._model = None
         self._name = model
+        self._model = _STT_CACHE.get(model)
 
     def _load(self):
         from faster_whisper import WhisperModel
-        self._model = WhisperModel(self._name, device="cpu", compute_type="int8")
+        self._model = _STT_CACHE.get(self._name)
+        if self._model is None:
+            self._model = WhisperModel(self._name, device="cpu", compute_type="int8")
+            _STT_CACHE[self._name] = self._model
 
     def transcribe(self, pcm16k: bytes) -> str:
         if self._model is None:
@@ -391,10 +399,19 @@ class VoicePipeline:
                  tts_voice="en-US-AriaNeural", card=None, agent_system=None):
         self.bot_name = bot_name
         self.outbound = outbound
+        self.card = card if isinstance(card, dict) else {}
         self.stt = Transcriber(stt_model)
         self.agent = CardGroundedAgent(
             bot_name, agent_backend, card=card, system=agent_system)
-        self.tts = Synthesizer(tts_voice)
+        # Local sovereign TTS first (Piper/ONNX): edge-tts 403s from
+        # blocked datacenter IPs. Falls back to the original Synthesizer
+        # if the local chain cannot be built, so speech never regresses.
+        try:
+            from .tts import make_synthesizer
+            self.tts = make_synthesizer(tts_voice)
+        except Exception as _e:
+            log.warning("local TTS unavailable (%s); using edge-tts", _e)
+            self.tts = Synthesizer(tts_voice)
         self._lock = asyncio.Lock()
         self._resampler = make_resampler()
 
@@ -439,9 +456,31 @@ class VoicePipeline:
                 return
             self.outbound.put_pcm(pcm48)
 
+    def _opening_line(self) -> str | None:
+        """A greeting built from THIS card, so the opening names the business and
+        what it does instead of the stock 'connected to the voice agent' line."""
+        ident = self.card.get("identity") or {}
+        if not isinstance(ident, dict):
+            ident = {}
+        name = str(ident.get("name") or "").strip()
+        if not name:
+            return None
+        parts = [f"Thanks for calling {name}!"]
+        tagline = str(ident.get("tagline") or ident.get("elevator_pitch") or "").strip()
+        if tagline:
+            parts.append(tagline.rstrip(".") + ".")
+        names = [_clean_offering_name(str(o.get("name")))
+                 for o in (self.card.get("offerings") or [])
+                 if isinstance(o, dict) and o.get("name")]
+        names = [n for n in names if n]
+        if names:
+            parts.append("We can help with " + ", ".join(names[:3]) + ".")
+        parts.append("How can I help you today?")
+        return " ".join(parts)
+
     async def greet(self, text: str | None = None) -> None:
         """Speak on connect so the caller knows the agent is live."""
-        msg = (text or GREETING).strip()
+        msg = (text or _ENV_GREETING or self._opening_line() or GREETING).strip()
         if not msg:
             return
         try:

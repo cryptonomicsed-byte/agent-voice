@@ -181,7 +181,6 @@ class VoiceEndpoint:
             except Exception:
                 return []
         ice_cfg = RTCConfiguration(iceServers=[
-            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
             *_turn_servers(),
         ])
         pc = RTCPeerConnection(configuration=ice_cfg)
@@ -282,7 +281,7 @@ class VoiceEndpoint:
         handles silence gracefully.
         """
         from .pipeline import frame_pcm, IN_RATE
-        CHUNK_BYTES = IN_RATE * 2 * 3  # 3 seconds of 16kHz s16 mono
+        CHUNK_BYTES = IN_RATE * 2 * 2  # 2 seconds (latency vs STT cost)
         MIN_BYTES = IN_RATE * 2 // 2   # 0.5s minimum to avoid empty STT calls
         buf = bytearray()
         last_flush = asyncio.get_event_loop().time()
@@ -292,7 +291,7 @@ class VoiceEndpoint:
                 for out in pipeline.resample_inbound(frame):
                     buf += frame_pcm(out)
                 now = asyncio.get_event_loop().time()
-                if len(buf) >= CHUNK_BYTES or (now - last_flush >= 3.0 and len(buf) >= MIN_BYTES):
+                if len(buf) >= CHUNK_BYTES or (now - last_flush >= 2.0 and len(buf) >= MIN_BYTES):
                     chunk = bytes(buf)
                     buf.clear()
                     last_flush = now

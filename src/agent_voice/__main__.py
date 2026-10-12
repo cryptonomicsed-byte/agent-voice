@@ -173,6 +173,17 @@ async def _main() -> int:
         else:
             log.warning("card has no id/organization_id — per-card memory disabled")
 
+    # Pre-warm STT + TTS so the FIRST call is not the one paying the model load.
+    # Both are process-global caches, so this is a one-time startup cost.
+    try:
+        from .pipeline import Transcriber
+        Transcriber(os.environ.get("AGENT_VOICE_STT_MODEL", "base"))._load()
+        from .tts import make_synthesizer
+        make_synthesizer()
+        log.info("prewarmed STT + TTS")
+    except Exception as e:  # never fail startup over a warm-up
+        log.warning("prewarm skipped: %s", e)
+
     ep = VoiceEndpoint(identity, relays, seckey=identity.seckey,
                        card=card, agent_backend=backend,
                        card_memory=card_memory)
