@@ -18,6 +18,8 @@ import logging
 import os
 import time
 
+from .pronunciation import normalize
+
 log = logging.getLogger(__name__)
 
 try:
@@ -70,6 +72,8 @@ class PiperSynthesizer:
 
     def _synth_blocking(self, text: str) -> bytes:
         pcm = bytearray()
+        # Heteronyms / phone numbers / currency -> a form espeak reads right.
+        text = normalize(text)
         for chunk in self._voice.synthesize(text):
             # 1.8.x yields AudioChunk; older builds yield raw bytes.
             b = getattr(chunk, "audio_int16_bytes", None)
