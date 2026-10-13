@@ -424,18 +424,20 @@ class QueueAudioTrack(AudioStreamTrack):
 # built for every call, so without this the model reloads on every call.
 _STT_CACHE: dict = {}
 
-# STT backend. Default is faster-whisper; moonshine is 3.7x faster (0.32 s vs 1.19 s
-# mean) and, on WHOLE utterances, also more accurate (8 kHz 1.2% vs 2.4%, +noise 4.9%
-# vs 7.3%). It measured worse (11.0% vs 6.1%) only on mid-word TRUNCATED fragments —
-# the condition created by the old blind 2-second chunking. EnergySegmenter now emits
-# complete utterances, which removes that condition: re-run the benchmark and moonshine
-# is expected to win outright. Kept on faster-whisper until that is re-measured on the
-# live path, so the two changes are not confounded. Measured 2026-10-13, 33 clips:
+# STT backend. moonshine is the default: it is ~5x faster on the LIVE path and at
+# least as accurate, now that EnergySegmenter feeds it complete utterances.
+#   live chunk->heard, same harness calls:  moonshine median ~300 ms (n=12, 220-865)
+#                                           faster-whisper median 1479 ms (n=6, 1015-4463)
+#   offline, telephone-band audio (33 clips): 8 kHz 1.2% vs 2.4%, +noise 4.9% vs 7.3%
+# moonshine used to LOSE (11.0% vs 6.1%) on mid-word TRUNCATED fragments — an artefact
+# of the old blind 2-second chunking. That condition is gone (utterances are now whole,
+# emitted on trailing silence), so the reason for the earlier revert is void.
 #   engine                 8k    8k_noise  trunc2s    ALL
 #   faster-whisper-base  2.4%     7.3%     6.1%     5.3%
 #   moonshine-BASE       1.2%     4.9%    11.0%     5.7%
-# Switch with AGENT_VOICE_STT_BACKEND=moonshine. Numbers: ~/docs/voice-agent-bench-2026-10-13.md
-STT_BACKEND = os.environ.get("AGENT_VOICE_STT_BACKEND", "faster-whisper").strip().lower()
+# faster-whisper is kept as the fallback (AGENT_VOICE_STT_BACKEND=faster-whisper).
+# Numbers: ~/docs/voice-agent-bench-2026-10-13.md
+STT_BACKEND = os.environ.get("AGENT_VOICE_STT_BACKEND", "moonshine").strip().lower()
 
 # moonshine model architecture (BASE | TINY | SMALL_STREAMING | MEDIUM_STREAMING | ...).
 # Do NOT drop to TINY for phone-band audio: it measured 11.0% WER vs BASE's 5.7%, e.g.
