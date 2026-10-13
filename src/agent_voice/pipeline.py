@@ -208,6 +208,17 @@ def decode_to_pcm48(data: bytes) -> bytes:
 # RTP sender starves (choppy/cutting audio).
 SILENCE_RMS = float(os.environ.get("AGENT_VOICE_SILENCE_RMS", "300"))
 
+# Barge-in: the caller talking over the agent STOPS the agent. Measured symptom
+# that forced this — a real call (2026-10-13 20:16) where the caller spoke during
+# the card-grounded greeting and the log read:
+#     chunk 64000B rms=2878 (gate=300)
+#     dropping utterance (speaking)
+# i.e. the caller was heard by the mic and then thrown away, so interrupting was
+# impossible; the turn only survived if it landed in a gap. Set
+# AGENT_VOICE_BARGE_IN=0 only on a device with no echo cancellation, where the
+# agent's own voice can reach the mic and it would interrupt itself.
+BARGE_IN = os.environ.get("AGENT_VOICE_BARGE_IN", "1").strip().lower() not in ("0", "false", "no", "off")
+
 # Spoken the moment a call connects, so the caller knows the agent is live
 # (and it doubles as an end-to-end test of the outbound audio path).
 _ENV_GREETING = os.environ.get("AGENT_VOICE_GREETING")
@@ -255,6 +266,18 @@ class QueueAudioTrack(AudioStreamTrack):
 
     def queued_seconds(self) -> float:
         return len(self._buf) / 2 / OUT_RATE
+
+    def clear(self) -> float:
+        """Drop queued-but-unplayed audio; return the seconds discarded.
+
+        This is the barge-in primitive. When the caller talks over the agent the
+        agent has to go quiet NOW — otherwise it keeps talking over them. `recv()`
+        keeps pacing and emits silence once the buffer is empty, so the RTP stream
+        stays alive and continuous rather than stalling.
+        """
+        dropped = self.queued_seconds()
+        self._buf.clear()
+        return dropped
 
     async def recv(self):
         # Pace to real time. aiortc's base AudioStreamTrack does this; a custom
@@ -458,9 +481,18 @@ class VoicePipeline:
             if level < SILENCE_RMS:
                 log.info(f"[{self.bot_name}] skip silence chunk (rms={level:.0f})")
                 return
-            if self.outbound.queued_seconds() > 2.0:
-                log.info(f"[{self.bot_name}] dropping utterance (speaking)")
-                return
+            # BARGE-IN. The caller talking over the agent stops the agent.
+            #
+            # This used to DROP the utterance whenever more than 2 s of agent audio
+            # was still queued ("dropping utterance (speaking)"), so anything said
+            # while the agent was talking was discarded and the caller could not
+            # interrupt. With a card-grounded greeting that runs several seconds, a
+            # caller's first words landed inside it and vanished. The caller's turn
+            # is the one that matters — silence the agent and answer them.
+            if BARGE_IN and self.outbound.queued_seconds() > 0:
+                dropped = self.outbound.clear()
+                log.info(f"[{self.bot_name}] barge-in: caller spoke over the agent "
+                         f"— stopped {dropped:.1f}s of speech")
             loop = asyncio.get_running_loop()
             try:
                 text = await loop.run_in_executor(
