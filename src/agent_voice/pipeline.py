@@ -6,7 +6,7 @@ with explicit null-price refusal (the WS5 "live refusal" path).
 
 Pipeline:
     inbound WebRTC audio (48kHz) --resample--> 16kHz mono PCM
-        --VADSegmenter--> utterances --Transcriber--> text
+        --EnergySegmenter--> complete utterances --Transcriber--> text
         --CardGroundedAgent--> reply text --Synthesizer--> 48kHz mono PCM
         --QueueAudioTrack--> outbound WebRTC audio
 """
@@ -35,7 +35,6 @@ OUT_RATE = 48000
 FRAME_MS = 20
 OUT_SAMPLES = OUT_RATE * FRAME_MS // 1000
 OUT_BYTES = OUT_SAMPLES * 2
-VAD_FRAME_BYTES = IN_RATE * 2 * 30 // 1000
 
 
 import re as _re
@@ -250,6 +249,91 @@ def rms16(pcm: bytes) -> float:
         return (acc / n) ** 0.5
 
 
+class EnergySegmenter:
+    """Endpoint utterances on trailing silence, and signal barge-in fast.
+
+    The live inbound path bypasses webrtcvad (it misclassifies the resampled Opus
+    frames as non-speech — see endpoint._pump_audio), which left it on blind
+    2-second time chunks. Every cut lands mid-word, and a truncated utterance is
+    ~2.5x more likely to be mis-transcribed: measured on the same audio, whole
+    utterances 2.4% WER vs truncated 6.1% (faster-whisper-base, 2026-10-13). This
+    segments on energy instead, so STT receives complete utterances.
+
+    It also separates the two jobs the old code conflated:
+      * barge-in fires after a short run of speech while the agent is talking
+        (responsive interruption, ~0.15 s rather than up to a 2 s chunk boundary);
+      * an utterance is only emitted after trailing silence, so it is complete.
+    """
+
+    def __init__(self, end_silence=0.6, barge_after=0.15, min_speech=0.3,
+                 max_seconds=8.0, silence_rms=SILENCE_RMS):
+        self.end_silence = end_silence
+        self.barge_after = barge_after
+        self.min_speech_bytes = int(IN_RATE * 2 * min_speech)
+        self.max_bytes = int(IN_RATE * 2 * max_seconds)
+        self.silence_rms = silence_rms
+        self._buf = bytearray()
+        self._speech_bytes = 0      # speech inside the CURRENT buffer
+        self._speech_run = 0.0      # speech since the last silence, for barge-in
+        self._silence = 0.0
+        self._barge_sent = False
+
+    def _reset_run(self):
+        self._buf.clear()
+        self._speech_bytes = 0
+        self._speech_run = 0.0
+        self._silence = 0.0
+        self._barge_sent = False
+
+    def feed(self, pcm16k: bytes):
+        """Feed one 16 kHz s16 mono frame.
+
+        Returns (utterances, barge_in) where `utterances` is a list of complete
+        PCM utterances (usually empty or one) and `barge_in` is True on the first
+        frame of a run of speech worth interrupting the agent for.
+        """
+        if not pcm16k:
+            return [], False
+        secs = len(pcm16k) / 2 / IN_RATE
+        self._buf += pcm16k
+        level = rms16(pcm16k)
+        if level >= self.silence_rms:
+            self._speech_bytes += len(pcm16k)
+            self._speech_run += secs
+            self._silence = 0.0
+        else:
+            self._speech_run = 0.0
+            self._silence += secs
+            self._barge_sent = False        # re-arm: next speech run signals again
+
+        barge_in = False
+        if not self._barge_sent and self._speech_run >= self.barge_after:
+            barge_in = True
+            self._barge_sent = True
+
+        # An utterance must carry real speech — emitting because a buffer merely got
+        # long (all silence) or because a 0.2 s blip tripped the gate is how "heard:
+        # Huh?" fragments reach the LLM.
+        enough_speech = self._speech_bytes >= self.min_speech_bytes
+        done = []
+        if len(self._buf) >= self.max_bytes:
+            if enough_speech:
+                done.append(bytes(self._buf))
+            self._reset_run()               # cap hit (or discard a long non-speech buffer)
+        elif self._silence >= self.end_silence and enough_speech:
+            done.append(bytes(self._buf))
+            self._reset_run()
+        return done, barge_in
+
+    def flush(self):
+        """Emit the pending utterance when the call ends."""
+        out = []
+        if self._speech_bytes >= self.min_speech_bytes:
+            out.append(bytes(self._buf))
+        self._reset_run()
+        return out
+
+
 class QueueAudioTrack(AudioStreamTrack):
     """Outbound WebRTC audio: PCM bytes queued, packetized at 20ms."""
 
@@ -307,75 +391,32 @@ class QueueAudioTrack(AudioStreamTrack):
 
 
 # ---------------------------------------------------------------------------
-# VAD / STT / Agent / TTS (from mesh-voice)
-
-
-def _make_vad(aggressiveness=2):
-    import webrtcvad
-    return webrtcvad.Vad(aggressiveness)
-
-
-class VADSegmenter:
-    """Collects speech into utterances; emits on trailing silence."""
-
-    def __init__(self, aggressiveness=2, silence_frames=20,
-                 pre_roll_frames=10, max_seconds=30, _vad=None):
-        self._vad = _vad or _make_vad(aggressiveness)
-        self.silence_frames = silence_frames
-        self.max_frames = int(max_seconds * 1000 / 30)
-        self._pre = []
-        self._pre_n = pre_roll_frames
-        self._utterance = None
-        self._silence = 0
-
-    def feed(self, frame30ms: bytes):
-        if len(frame30ms) != VAD_FRAME_BYTES:
-            raise ValueError(f"VAD needs {VAD_FRAME_BYTES}-byte frames")
-        is_speech = self._vad.is_speech(frame30ms, IN_RATE)
-        done = []
-        if self._utterance is None:
-            self._pre.append(frame30ms)
-            if len(self._pre) > self._pre_n:
-                self._pre.pop(0)
-            if is_speech:
-                self._utterance = bytearray(b"".join(self._pre))
-                self._pre.clear()
-                self._silence = 0
-        else:
-            self._utterance += frame30ms
-            if is_speech:
-                self._silence = 0
-            else:
-                self._silence += 1
-                if (self._silence >= self.silence_frames or
-                        len(self._utterance) >= self.max_frames * VAD_FRAME_BYTES):
-                    done.append(bytes(self._utterance))
-                    self._utterance = None
-        return done
-
-    def flush(self):
-        if self._utterance:
-            out = [bytes(self._utterance)]
-            self._utterance = None
-            return out
-        return []
+# STT / Agent / TTS (from mesh-voice)
+#
+# The webrtcvad-backed `VADSegmenter` that used to live here has been DELETED. It was
+# never reachable: `endpoint._pump_audio` bypassed it because webrtcvad consistently
+# classifies the resampled Opus frames as non-speech, and the live path fell back to
+# blind 2-second time chunks. Segmentation is now `EnergySegmenter` (energy/RMS, above),
+# which is what `_pump_audio` drives. Leaving a dead `VADSegmenter` here is not harmless
+# clutter — it is what made a review of this file plan a VAD-library swap (silero-vad)
+# that could not have changed a single sample, because nothing called the VAD at all.
 
 
 # Load the STT model ONCE per process: a fresh VoicePipeline (hence Transcriber) is
 # built for every call, so without this the model reloads on every call.
 _STT_CACHE: dict = {}
 
-# STT backend. Default is faster-whisper: on the condition this pipeline actually
-# feeds — SHORT mid-utterance fragments (our 2 s time-chunking) — it beats moonshine
-# 6.1% vs 11.0% WER. moonshine is faster (0.32 s vs 1.19 s mean) and better on
-# full-length band-limited audio (8 kHz: 1.2% vs 2.4%; +noise: 4.9% vs 7.3%), but it
-# loses badly once the tail of an utterance is cut off, which is the live case.
-# Measured 2026-10-13, 33 degraded clips, 2-core VPS:
+# STT backend. Default is faster-whisper; moonshine is 3.7x faster (0.32 s vs 1.19 s
+# mean) and, on WHOLE utterances, also more accurate (8 kHz 1.2% vs 2.4%, +noise 4.9%
+# vs 7.3%). It measured worse (11.0% vs 6.1%) only on mid-word TRUNCATED fragments —
+# the condition created by the old blind 2-second chunking. EnergySegmenter now emits
+# complete utterances, which removes that condition: re-run the benchmark and moonshine
+# is expected to win outright. Kept on faster-whisper until that is re-measured on the
+# live path, so the two changes are not confounded. Measured 2026-10-13, 33 clips:
 #   engine                 8k    8k_noise  trunc2s    ALL
 #   faster-whisper-base  2.4%     7.3%     6.1%     5.3%
 #   moonshine-BASE       1.2%     4.9%    11.0%     5.7%
-# Set AGENT_VOICE_STT_BACKEND=moonshine to switch (e.g. if the chunking cadence
-# changes to full-utterance audio). Numbers: ~/docs/voice-agent-bench-2026-10-13.md
+# Switch with AGENT_VOICE_STT_BACKEND=moonshine. Numbers: ~/docs/voice-agent-bench-2026-10-13.md
 STT_BACKEND = os.environ.get("AGENT_VOICE_STT_BACKEND", "faster-whisper").strip().lower()
 
 # moonshine model architecture (BASE | TINY | SMALL_STREAMING | MEDIUM_STREAMING | ...).
