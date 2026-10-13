@@ -15,6 +15,13 @@ websockets>=14.0
 pyyaml>=6.0
 numpy>=1.24.0
 
+# STT. moonshine is the DEFAULT backend (see pipeline.STT_BACKEND): measured 3.7x lower
+# latency than faster-whisper at equal accuracy on telephone-band audio. faster-whisper
+# is kept as the fallback (AGENT_VOICE_STT_BACKEND=faster-whisper). Perf numbers:
+# ~/docs/voice-agent-bench-2026-10-13.md on the dev host.
+moonshine-voice>=0.1.5
+faster-whisper>=1.0.0
+
 # Sibling repos, pinned.
 agent-phone @ git+https://github.com/cryptonomicsed-byte/agent-phone.git@39d91960ba70c0be2da9bab6c271530d896a9507
 minipae     @ git+https://github.com/cryptonomicsed-byte/minipae.git@99eb98bf9fa4e679067f512d1e2595557cfc574a

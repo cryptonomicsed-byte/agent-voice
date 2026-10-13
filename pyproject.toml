@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 voice = [
+    "moonshine-voice>=0.1.5",
     "faster-whisper>=1.0.0",
     "edge-tts>=6.1.0",
     "webrtcvad>=2.0.10",
