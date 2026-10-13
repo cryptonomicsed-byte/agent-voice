@@ -70,6 +70,16 @@ def test_short_blip_below_minimum_is_dropped():
     assert utts == [], "a 0.2 s blip (under the 0.5 s floor) should not reach STT"
 
 
+def test_leading_silence_is_trimmed_from_the_utterance():
+    """A caller quiet for 3 s before a question must not hand STT 3 s of dead air."""
+    seg = EnergySegmenter()
+    utts, _ = run(seg, pcm(3.0, QUIET) + pcm(1.2, SPEECH) + pcm(1.0, QUIET))
+    assert len(utts) == 1, f"expected 1 utterance, got {len(utts)}"
+    secs = len(utts[0]) / 2 / IN_RATE
+    assert secs < 2.5, f"leading silence not trimmed ({secs:.1f}s sent to STT)"
+    assert secs >= 1.2, "the speech itself was lost"
+
+
 def test_continuous_talker_is_capped_not_unbounded():
     seg = EnergySegmenter(max_seconds=2.0)
     utts, _ = run(seg, pcm(6.0, SPEECH))

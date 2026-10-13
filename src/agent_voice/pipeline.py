@@ -266,16 +266,18 @@ class EnergySegmenter:
     """
 
     def __init__(self, end_silence=0.6, barge_after=0.15, min_speech=0.3,
-                 max_seconds=8.0, silence_rms=SILENCE_RMS):
+                 max_seconds=8.0, preroll=0.2, silence_rms=SILENCE_RMS):
         self.end_silence = end_silence
         self.barge_after = barge_after
         self.min_speech_bytes = int(IN_RATE * 2 * min_speech)
         self.max_bytes = int(IN_RATE * 2 * max_seconds)
+        self.preroll_bytes = int(IN_RATE * 2 * preroll)
         self.silence_rms = silence_rms
         self._buf = bytearray()
         self._speech_bytes = 0      # speech inside the CURRENT buffer
         self._speech_run = 0.0      # speech since the last silence, for barge-in
         self._silence = 0.0
+        self._first_speech = None   # offset of the first speech frame in _buf
         self._barge_sent = False
 
     def _reset_run(self):
@@ -283,7 +285,20 @@ class EnergySegmenter:
         self._speech_bytes = 0
         self._speech_run = 0.0
         self._silence = 0.0
+        self._first_speech = None
         self._barge_sent = False
+
+    def _take(self):
+        """Slice the utterance, dropping the SILENCE BEFORE the caller spoke.
+
+        Without this, a caller who is quiet for a few seconds before a short question
+        hands STT several seconds of dead air — pure wasted latency on the critical
+        path (and enough to trip the max-length cap). A short pre-roll is kept so the
+        onset of the first word is not clipped.
+        """
+        start = self._first_speech or 0
+        start = max(0, start - self.preroll_bytes)
+        return bytes(self._buf[start:])
 
     def feed(self, pcm16k: bytes):
         """Feed one 16 kHz s16 mono frame.
@@ -295,9 +310,12 @@ class EnergySegmenter:
         if not pcm16k:
             return [], False
         secs = len(pcm16k) / 2 / IN_RATE
+        frame_start = len(self._buf)
         self._buf += pcm16k
         level = rms16(pcm16k)
         if level >= self.silence_rms:
+            if self._first_speech is None:
+                self._first_speech = frame_start
             self._speech_bytes += len(pcm16k)
             self._speech_run += secs
             self._silence = 0.0
@@ -318,10 +336,10 @@ class EnergySegmenter:
         done = []
         if len(self._buf) >= self.max_bytes:
             if enough_speech:
-                done.append(bytes(self._buf))
+                done.append(self._take())
             self._reset_run()               # cap hit (or discard a long non-speech buffer)
         elif self._silence >= self.end_silence and enough_speech:
-            done.append(bytes(self._buf))
+            done.append(self._take())
             self._reset_run()
         return done, barge_in
 
@@ -329,7 +347,7 @@ class EnergySegmenter:
         """Emit the pending utterance when the call ends."""
         out = []
         if self._speech_bytes >= self.min_speech_bytes:
-            out.append(bytes(self._buf))
+            out.append(self._take())
         self._reset_run()
         return out
 
