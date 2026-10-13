@@ -365,13 +365,18 @@ class VADSegmenter:
 # built for every call, so without this the model reloads on every call.
 _STT_CACHE: dict = {}
 
-# STT backend. moonshine is the default because it measured 3.7x lower latency than
-# faster-whisper at equal accuracy — on telephone-band audio (8 kHz + noise + 2 s
-# truncation, 33 clips, 2-core VPS, 2026-10-13): mean 0.32 s vs 1.19 s, WER 5.7% vs
-# 5.3%, model load 0.61 s vs 1.10 s. That latency is on the critical path between the
-# caller finishing a turn and the reply starting. faster-whisper remains as the
-# fallback so speech never regresses if moonshine cannot be imported.
-STT_BACKEND = os.environ.get("AGENT_VOICE_STT_BACKEND", "moonshine").strip().lower()
+# STT backend. Default is faster-whisper: on the condition this pipeline actually
+# feeds — SHORT mid-utterance fragments (our 2 s time-chunking) — it beats moonshine
+# 6.1% vs 11.0% WER. moonshine is faster (0.32 s vs 1.19 s mean) and better on
+# full-length band-limited audio (8 kHz: 1.2% vs 2.4%; +noise: 4.9% vs 7.3%), but it
+# loses badly once the tail of an utterance is cut off, which is the live case.
+# Measured 2026-10-13, 33 degraded clips, 2-core VPS:
+#   engine                 8k    8k_noise  trunc2s    ALL
+#   faster-whisper-base  2.4%     7.3%     6.1%     5.3%
+#   moonshine-BASE       1.2%     4.9%    11.0%     5.7%
+# Set AGENT_VOICE_STT_BACKEND=moonshine to switch (e.g. if the chunking cadence
+# changes to full-utterance audio). Numbers: ~/docs/voice-agent-bench-2026-10-13.md
+STT_BACKEND = os.environ.get("AGENT_VOICE_STT_BACKEND", "faster-whisper").strip().lower()
 
 # moonshine model architecture (BASE | TINY | SMALL_STREAMING | MEDIUM_STREAMING | ...).
 # Do NOT drop to TINY for phone-band audio: it measured 11.0% WER vs BASE's 5.7%, e.g.
@@ -410,10 +415,12 @@ class Transcriber:
             arch = getattr(mv.ModelArch, STT_MOONSHINE_ARCH)
             path, resolved = mv.get_model_for_language("en", arch)
             self._model = ("moonshine", mv.Transcriber(path, resolved))
+            log.info("STT backend: moonshine %s (%s)", STT_MOONSHINE_ARCH, path)
         else:
             from faster_whisper import WhisperModel
             self._model = ("faster-whisper",
                            WhisperModel(self._name, device="cpu", compute_type="int8"))
+            log.info("STT backend: faster-whisper %s", self._name)
         _STT_CACHE[key] = self._model
 
     def transcribe(self, pcm16k: bytes) -> str:
