@@ -445,16 +445,80 @@ STT_BACKEND = os.environ.get("AGENT_VOICE_STT_BACKEND", "moonshine").strip().low
 STT_MOONSHINE_ARCH = os.environ.get("AGENT_VOICE_MOONSHINE_ARCH", "BASE").strip().upper()
 
 
+# A TranscriptLine's repr nests a metadata block that itself contains a list
+# (`speaker_spans=[]`), so the closing bracket has to be found by depth rather
+# than by the first ']'. Match the block by its opening token…
+_META_OPEN = _re.compile(r"metadata:\s*\[", _re.I)
+# …and strip the "[0.00s]: " / "[5.79s]: " prefix these reprs carry.
+_REPR_PREFIX = _re.compile(r"^\[\d+(?:\.\d+)?s\]:\s*")
+
+
+def _strip_line_repr(s: str) -> str:
+    """Salvage the words out of a TranscriptLine repr, dropping its metadata block.
+
+    Used only when a line's `.text` is empty but its repr still carries the words.
+    Returns "" rather than something that still looks like metadata, so a parse we
+    did not anticipate degrades to silence instead of a dump in the LLM prompt.
+    """
+    out, i = [], 0
+    while i < len(s):
+        m = _META_OPEN.search(s, i)
+        if not m:
+            out.append(s[i:])
+            break
+        out.append(s[i:m.start()])
+        j, depth = m.end() - 1, 0            # j sits on the '['
+        while j < len(s):
+            if s[j] == "[":
+                depth += 1
+            elif s[j] == "]":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        i = j + 1                            # skip past the whole block
+    t = _REPR_PREFIX.sub("", "".join(out))
+    t = t.replace("'', ", " ").replace('"", ', " ")
+    t = _re.sub(r"^[\s'\",]+", "", t)         # leading quote/comma/space artefacts
+    t = _re.sub(r"[\s'\",]+$", "", t)         # trailing ones; inner apostrophes kept
+    t = " ".join(t.split())
+    if "line_id=" in t or "metadata:" in t:
+        return ""
+    return t
+
+
 def _moonshine_text(res) -> str:
-    """Pull the transcript out of a moonshine Transcript without guessing its shape."""
-    for attr in ("text", "transcript"):
-        v = getattr(res, attr, None)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    lines = getattr(res, "lines", None)
-    if lines:
-        return " ".join(getattr(l, "text", "") or str(l) for l in lines).strip()
-    return str(res).strip()
+    """Pull the transcript out of a moonshine result without guessing its shape.
+
+    `transcribe_without_streaming` returns a `Transcript` whose `.lines` are
+    `TranscriptLine` objects; `.text` on a line is the clean string and is what we
+    want. Some lines come back with EMPTY text while their repr still holds the words
+    plus a `metadata: [...]` block — falling back to `str(line)` there leaked the
+    entire metadata dump into the prompt. Seen on the live path (2026-10-13):
+
+        heard: [0.00s]: '', metadata: [duration=0.35s, line_id=9051562705621547848,
+               …, speaker_spans=[], words=0] Hi, why are you opening hours?
+
+    That exact string was handed to the LLM. Hence: prefer `.text`, salvage the repr
+    through `_strip_line_repr` when there is none, and never return a raw `str()`.
+    """
+    if isinstance(res, (list, tuple)):       # defensive: a bare sequence of Transcripts
+        return " ".join(t for t in (_moonshine_text(x) for x in res) if t).strip()
+    v = getattr(res, "text", None)           # Transcript-level text (older builds)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    parts = []
+    for line in (getattr(res, "lines", None) or []):
+        t = getattr(line, "text", None)
+        if isinstance(t, str) and t.strip():
+            parts.append(t.strip())
+            continue
+        t = _strip_line_repr(str(line))
+        if t:
+            parts.append(t)
+    if parts:
+        return " ".join(parts).strip()
+    return _strip_line_repr(str(res))
 
 
 class Transcriber:
