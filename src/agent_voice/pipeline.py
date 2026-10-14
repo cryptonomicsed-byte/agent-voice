@@ -482,7 +482,8 @@ def _strip_line_repr(s: str) -> str:
     t = _re.sub(r"^[\s'\",]+", "", t)         # leading quote/comma/space artefacts
     t = _re.sub(r"[\s'\",]+$", "", t)         # trailing ones; inner apostrophes kept
     t = " ".join(t.split())
-    if "line_id=" in t or "metadata:" in t:
+    if any(smell in t for smell in ("line_id=", "metadata:", "lines=", "Transcript(")) \
+            or t.startswith("<"):
         return ""
     return t
 
