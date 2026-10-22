@@ -1,0 +1,17 @@
+[Unit]
+Description=TURN credentials HTTP server (agent-voice)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/ares/agent-voice
+ExecStart=/opt/ares/venv/bin/python3 /opt/ares/agent-voice/turn/turn_creds.py
+Restart=always
+RestartSec=5
+
+# Credentials — set in /etc/agent-voice.env, not here
+EnvironmentFile=/etc/agent-voice.env
+
+[Install]
+WantedBy=multi-user.target
