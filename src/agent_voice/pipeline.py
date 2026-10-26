@@ -63,7 +63,8 @@ def opening_line(card: dict) -> str | None:
     if not name:
         return None
     parts = [f"Thanks for calling {name}!"]
-    tagline = str(ident.get("tagline") or ident.get("elevator_pitch") or "").strip()
+    tagline = str(ident.get("tagline") or ident.get("elevator_pitch")
+                  or ident.get("elevatorPitch") or "").strip()
     if tagline:
         parts.append(tagline.rstrip(".") + ".")
     names = [_clean_offering_name(str(o.get("name")))
@@ -95,7 +96,11 @@ def build_voice_system_prompt(card: dict) -> str:
 
     L = []
     name = ident.get("name", "this business") if isinstance(ident, dict) else "this business"
+    tagline = (ident.get("tagline") or ident.get("elevator_pitch")
+               or ident.get("elevatorPitch") or "") if isinstance(ident, dict) else ""
     L.append(f"You are the AI phone agent for **{name}**.")
+    if tagline:
+        L.append(f"About the business: {tagline.rstrip('.')}")
     L.append("You are on a live voice call. Keep every reply to one or two "
              "short spoken sentences. No lists, no markdown, no emojis.")
     tone = voice.get("tone", []) if isinstance(voice, dict) else []

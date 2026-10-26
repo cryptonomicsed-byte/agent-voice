@@ -40,7 +40,7 @@ def card_id_for(card: dict | None) -> str:
     """
     if not isinstance(card, dict):
         return ""
-    for key in ("id", "organization_id"):
+    for key in ("id", "organization_id", "organizationId"):
         val = card.get(key)
         if isinstance(val, str) and val.strip():
             return val.strip()

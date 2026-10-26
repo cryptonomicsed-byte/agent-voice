@@ -192,6 +192,18 @@ async def _main() -> int:
                        card=card, agent_backend=backend,
                        card_memory=card_memory)
 
+    http_port_env = os.environ.get("AGENT_VOICE_HTTP_PORT", "").strip()
+    tasks = []
+    if http_port_env:
+        try:
+            http_port = int(http_port_env)
+            from .http_server import start_http_server
+            tasks.append(asyncio.create_task(
+                start_http_server(http_port, card or {}, backend)))
+            log.info("HTTP bridge scheduled on port %d", http_port)
+        except (ValueError, RuntimeError) as e:
+            log.warning("HTTP bridge disabled: %s", e)
+
     log.info("relays: %s | backend: %s | card: %s", relays, backend, card_path or "(none)")
     try:
         await ep.run()
@@ -199,6 +211,8 @@ async def _main() -> int:
         log.info("interrupted")
     finally:
         ep.stop()
+        for t in tasks:
+            t.cancel()
     return 0
 
 

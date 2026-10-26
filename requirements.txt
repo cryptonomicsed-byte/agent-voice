@@ -23,5 +23,9 @@ moonshine-voice>=0.1.5
 faster-whisper>=1.0.0
 
 # Sibling repos, pinned.
+# HTTP bridge (AGENT_VOICE_HTTP_PORT activates it)
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
 agent-phone @ git+https://github.com/cryptonomicsed-byte/agent-phone.git@39d91960ba70c0be2da9bab6c271530d896a9507
 minipae     @ git+https://github.com/cryptonomicsed-byte/minipae.git@99eb98bf9fa4e679067f512d1e2595557cfc574a
