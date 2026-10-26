@@ -575,7 +575,10 @@ class Transcriber:
 class CardGroundedAgent:
     """LLM agent with a CARD-compiled system prompt.
 
-    backend="deepseek" (default) or "echo" for dry runs.
+    backend:
+      "deepseek" — uses DEEPSEEK_API_KEY (legacy)
+      "generic"  — uses LLM_API_KEY / LLM_BASE_URL / LLM_MODEL (OpenAI-compat)
+      "echo"     — dry-run, echoes input
     """
 
     def __init__(self, bot_name, backend="deepseek", card=None,
@@ -591,13 +594,24 @@ class CardGroundedAgent:
                 f"You are {bot_name}, a friendly voice assistant. "
                 "Keep replies to one or two short spoken sentences.")
         self._client = None
+        self._model = "deepseek-chat"
         if backend == "deepseek":
-            if not os.environ.get("DEEPSEEK_API_KEY"):
-                raise RuntimeError("DEEPSEEK_API_KEY is not set")
+            api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("LLM_API_KEY")
+            if not api_key:
+                raise RuntimeError("DEEPSEEK_API_KEY or LLM_API_KEY is not set")
             from openai import OpenAI
             self._client = OpenAI(
-                api_key=os.environ["DEEPSEEK_API_KEY"],
-                base_url="https://api.deepseek.com")
+                api_key=api_key,
+                base_url=os.environ.get("LLM_BASE_URL", "https://api.deepseek.com"))
+            self._model = os.environ.get("LLM_MODEL", "deepseek-chat")
+        elif backend == "generic":
+            api_key = os.environ.get("LLM_API_KEY")
+            base_url = os.environ.get("LLM_BASE_URL")
+            if not api_key or not base_url:
+                raise RuntimeError("LLM_API_KEY and LLM_BASE_URL must be set for generic backend")
+            from openai import OpenAI
+            self._client = OpenAI(api_key=api_key, base_url=base_url)
+            self._model = os.environ.get("LLM_MODEL", "gemini-3.8-flash")
         elif backend != "echo":
             raise ValueError(f"unknown backend: {backend}")
 
@@ -605,7 +619,7 @@ class CardGroundedAgent:
         if self.backend == "echo":
             return f"You said: {text}"
         resp = self._client.chat.completions.create(
-            model="deepseek-chat",
+            model=self._model,
             messages=[{"role": "system", "content": self.system},
                       {"role": "user", "content": text}],
             max_tokens=150,
