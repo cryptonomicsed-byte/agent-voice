@@ -14,7 +14,7 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ _agent_backend: str = "deepseek"
 
 def _get_app():
     try:
-        from fastapi import FastAPI
+        from fastapi import Body, FastAPI
         from fastapi.middleware.cors import CORSMiddleware
         from pydantic import BaseModel
     except ImportError as e:
@@ -80,7 +80,7 @@ def _get_app():
         return {"system_prompt": system, "opening_line": greeting}
 
     @app.post("/chat", response_model=ChatResponse)
-    async def chat(req: ChatRequest):
+    async def chat(req: Annotated[ChatRequest, Body()]):
         sid = req.session_id or str(uuid.uuid4())
         history: list[dict[str, str]] = req.history or _sessions.get(sid, [])
 
