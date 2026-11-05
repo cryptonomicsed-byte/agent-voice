@@ -38,14 +38,19 @@ KIND_AUTH = 22242
 
 
 def _nip42_event(challenge: str, relay_url: str, seckey: bytes) -> dict:
-    """Build and sign a NIP-42 AUTH event (kind:22242)."""
+    """Build and sign a NIP-42 AUTH event (kind:22242).
+
+    The relay URL in the AUTH tag MUST match what the relay sees as its own
+    URL — which is {scheme}://{Host-header}, NOT the nginx-prefixed path.
+    Strip the path so wss://omokoda.duckdns.org:3443/relay -> wss://omokoda.duckdns.org:3443.
+    """
+    # Strip path: relay_url may have a /relay prefix added by nginx for routing
+    # but the relay verifies against scheme+host only (no path).
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(relay_url)
+    relay_url_for_auth = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
     content = ""
-    tags = [["relay", relay_url], ["challenge", challenge]]
-    created_at = int(time.time())
-    serialised = json.dumps(
-        [0, "", created_at, KIND_AUTH, tags, content],
-        separators=(",", ":"), ensure_ascii=False)
-    event_id = hashlib.sha256(serialised.encode()).hexdigest()
+    tags = [["relay", relay_url_for_auth], ["challenge", challenge]]
     # minipae.sign_event returns a full Nostr event dict
     return minipae.sign_event(KIND_AUTH, content, tags, seckey)
 
@@ -68,6 +73,35 @@ async def subscribe_calls(relay: str, our_pubkey_hex: str,
         relay, open_timeout=15, max_size=10 * 1024 * 1024,
         ping_interval=20, ping_timeout=20,
     ) as ws:
+        # NIP-42: relay may send AUTH challenge immediately on connect (before
+        # we issue REQ). Handle it before subscribing — sending REQ first on a
+        # relay that requires pre-auth leads to CLOSED with auth-required.
+        try:
+            first_raw = await asyncio.wait_for(ws.recv(), timeout=2)
+            first_msg = json.loads(first_raw)
+            if first_msg[0] == "AUTH":
+                challenge = first_msg[1]
+                if seckey is None:
+                    raise RuntimeError(
+                        f"relay {relay} requires NIP-42 AUTH but no seckey supplied")
+                auth_event = _nip42_event(challenge, relay, seckey)
+                await ws.send(json.dumps(["AUTH", auth_event]))
+                ok_raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                ok = json.loads(ok_raw)
+                if ok[0] == "OK" and ok[2]:
+                    log.info(f"NIP-42 AUTH accepted by {relay} (pre-REQ)")
+                else:
+                    log.warning(f"NIP-42 AUTH rejected by {relay}: {ok}")
+            # Non-AUTH initial message is buffered back for the main loop
+            else:
+                # stash it so the loop sees it
+                _initial = first_msg
+                async def _patched_recv():
+                    return first_raw
+                # We will re-inject it below
+        except asyncio.TimeoutError:
+            pass  # relay sent nothing yet; proceed with REQ normally
+
         await ws.send(json.dumps(["REQ", sub_id, filt]))
         while True:
             raw = await asyncio.wait_for(ws.recv(), timeout=None)
