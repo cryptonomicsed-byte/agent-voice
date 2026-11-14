@@ -735,3 +735,39 @@ class VoicePipeline:
             return
         self.outbound.put_pcm(pcm48)
         log.info(f"[{self.bot_name}] greets: {msg}")
+
+
+async def pump_audio(track, pipeline) -> None:
+    """Feed one inbound audio track into a VoicePipeline until the track ends.
+
+    Transport-neutral: the Nostr endpoint and mesh-voice both use it.
+
+    webrtcvad is deliberately NOT used here: it consistently classifies the
+    decoded WebRTC Opus frames as non-speech, so this used to fall back to blind
+    2-second time chunks. Every cut landed mid-word, and a truncated utterance is
+    ~2.5x more likely to be mis-transcribed — measured on the same audio,
+    faster-whisper-base scores 2.4% WER on whole utterances vs 6.1% truncated
+    (2026-10-13). EnergySegmenter instead emits COMPLETE utterances on trailing
+    silence, so the transcriber sees whole sentences.
+
+    That change alone would make interruption slower (waiting for the caller to
+    pause), so the two jobs are separated: barge-in is signalled after ~0.15 s of
+    speech while the agent is talking, and the utterance is emitted separately on
+    silence.
+    """
+    seg = EnergySegmenter()
+    try:
+        while True:
+            frame = await track.recv()
+            for out in pipeline.resample_inbound(frame):
+                utterances, barge = seg.feed(frame_pcm(out))
+                if barge and pipeline.outbound.queued_seconds() > 0:
+                    dropped = pipeline.outbound.clear()
+                    log.info(f"barge-in: caller spoke over the agent — "
+                             f"stopped {dropped:.1f}s of speech")
+                for utter in utterances:
+                    asyncio.ensure_future(pipeline.handle_utterance(utter))
+    except Exception as e:
+        for utter in seg.flush():
+            asyncio.ensure_future(pipeline.handle_utterance(utter))
+        log.info(f"audio track ended ({e})")

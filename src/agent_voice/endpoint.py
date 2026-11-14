@@ -344,39 +344,9 @@ class VoiceEndpoint:
         log.info(f"answered call {sig.call_id[:8]}...")
 
     async def _pump_audio(self, track, pipeline) -> None:
-        """Feed inbound audio into the pipeline, segmented by energy.
-
-        webrtcvad is deliberately NOT used here: it consistently classifies the
-        decoded WebRTC Opus frames as non-speech, so this used to fall back to blind
-        2-second time chunks. Every cut landed mid-word, and a truncated utterance is
-        ~2.5x more likely to be mis-transcribed — measured on the same audio,
-        faster-whisper-base scores 2.4% WER on whole utterances vs 6.1% truncated
-        (2026-10-13). EnergySegmenter instead emits COMPLETE utterances on trailing
-        silence, so the transcriber sees whole sentences.
-
-        That change alone would make interruption slower (waiting for the caller to
-        pause), so the two jobs are separated: barge-in is signalled after ~0.15 s of
-        speech while the agent is talking, and the utterance is emitted separately on
-        silence.
-        """
-        from .pipeline import EnergySegmenter, frame_pcm
-
-        seg = EnergySegmenter()
-        try:
-            while True:
-                frame = await track.recv()
-                for out in pipeline.resample_inbound(frame):
-                    utterances, barge = seg.feed(frame_pcm(out))
-                    if barge and pipeline.outbound.queued_seconds() > 0:
-                        dropped = pipeline.outbound.clear()
-                        log.info(f"barge-in: caller spoke over the agent — "
-                                 f"stopped {dropped:.1f}s of speech")
-                    for utter in utterances:
-                        asyncio.ensure_future(pipeline.handle_utterance(utter))
-        except Exception as e:
-            for utter in seg.flush():
-                asyncio.ensure_future(pipeline.handle_utterance(utter))
-            log.info(f"audio track ended ({e})")
+        """Feed inbound audio into the pipeline (see pipeline.pump_audio)."""
+        from .pipeline import pump_audio
+        await pump_audio(track, pipeline)
 
     async def _add_ice(self, sig) -> None:
         pc = self.peer_connections.get(sig.call_id)
