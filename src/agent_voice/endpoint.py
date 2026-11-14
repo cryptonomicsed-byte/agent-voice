@@ -18,9 +18,10 @@ import time
 log = logging.getLogger(__name__)
 
 try:
-    from agent_phone import Identity, SignalType, parse_signal
+    from agent_phone import Identity, SignalType
     from agent_phone.signaling import CallSession, build_ice
     import minipae
+    from .verified_signal import parse_signal_with_sender
     HAS_SIGNALING = True
 except ImportError:
     HAS_SIGNALING = False
@@ -35,6 +36,7 @@ except ImportError:
 
 KIND_GIFT_WRAP = 1059
 KIND_AUTH = 22242
+SEEN_EVENTS_MAX = 4096
 
 
 def _nip42_event(challenge: str, relay_url: str, seckey: bytes) -> dict:
@@ -157,6 +159,10 @@ class VoiceEndpoint:
         self._call_started: dict[str, float] = {}
         self.sessions: dict[str, CallSession] = {}
         self.peer_connections: dict[str, RTCPeerConnection] = {}
+        # Outer event ids already handled. The same event arrives once per
+        # relay and again on every reconnect backlog; without this a replayed
+        # OFFER opens a second peer connection for the same call.
+        self._seen_events: dict[str, None] = {}
         self._running = False
 
     def _load_card_memory(self) -> dict:
@@ -179,20 +185,50 @@ class VoiceEndpoint:
             except Exception as e:
                 log.warning(f"publish to {relay} failed: {e}")
 
+    def _is_replay(self, event_id: str) -> bool:
+        if event_id in self._seen_events:
+            return True
+        self._seen_events[event_id] = None
+        while len(self._seen_events) > SEEN_EVENTS_MAX:
+            self._seen_events.pop(next(iter(self._seen_events)))
+        return False
+
     async def _handle_event(self, event: dict) -> None:
-        """Decrypt one gift-wrap and dispatch by signal type."""
+        """Decrypt one gift-wrap and dispatch by signal type.
+
+        The caller is the *verified* sender: the seal signer for a three-layer
+        NIP-17 wrap, the outer signer for a legacy one-layer wrap. The outer
+        pubkey alone is a throwaway key for NIP-17 and must never be used for
+        routing.
+        """
         try:
-            sig = parse_signal(event, self.identity)
+            verified = parse_signal_with_sender(event, self.identity)
         except ValueError as e:
             log.warning(f"ignoring untrusted event: {e}")
             return
+        if self._is_replay(verified.event_id):
+            return
 
-        caller_pubkey = bytes.fromhex(event["pubkey"])
-        log.info(f"signal {sig.type.value} for call {sig.call_id[:8]}...")
+        sig, caller_pubkey = verified.signal, verified.sender
+        log.info(f"signal {sig.type.value} for call {sig.call_id[:8]}... "
+                 f"({verified.layers}-layer)")
 
         if sig.type is SignalType.OFFER:
+            if sig.call_id in self.sessions:
+                log.warning(f"ignoring second offer for live call {sig.call_id[:8]}...")
+                return
             await self._answer_offer(sig, caller_pubkey)
-        elif sig.type is SignalType.HANGUP:
+            return
+
+        # ICE and HANGUP only count from the party that placed the call.
+        session = self.sessions.get(sig.call_id)
+        if session is None:
+            return
+        if session.peer_pubkey != caller_pubkey:
+            log.warning(f"ignoring {sig.type.value} for call {sig.call_id[:8]}... "
+                        "from a key that is not the caller")
+            return
+        if sig.type is SignalType.HANGUP:
             await self._close_call(sig.call_id)
         elif sig.type is SignalType.ICE:
             await self._add_ice(sig)
