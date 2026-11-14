@@ -48,3 +48,32 @@ Phase 1 in progress. See the [sovereign voice blueprint](https://github.com/cryp
 ## License
 
 Private — HelixMain IP.
+
+## Call center calls (SIP, via ai-native-callcenter)
+
+`python -m agent_voice.realtime_gateway` is the AI leg for
+[ai-native-callcenter](https://github.com/rasonyang/ai-native-callcenter): it
+speaks the Realtime protocol that project's `gateway` provider dials, and runs
+the same speech pipeline behind it.
+
+```bash
+HELIX_REALTIME_API_KEY=<key> LLM_BASE_URL=... LLM_API_KEY=... LLM_MODEL=... \
+  python -m agent_voice.realtime_gateway --port 8080 --companies /etc/helix/companies
+```
+
+Call center settings: `AICC_PROVIDER=gateway`,
+`AICC_PROVIDER_ENDPOINT=ws://127.0.0.1:8080/v1/realtime`,
+`REALTIME_API_KEY=<the same key>`, and name a transcription provider
+(`AICC_TRANSCRIBE_PROVIDER`), as its docs require for a gateway.
+
+**Which business answers.** The call center sends no number or tenant to the
+provider, only the flow's settings. Set the flow's `voice` to
+`helix:<card id>` or `helix:<company directory name>`; the gateway grounds the
+call on that card. A reference it cannot resolve is refused, not answered
+generically. The flow's own instructions are added as directions for the call,
+and its tools (transfer to a person, HTTP tools) are offered to the model and
+executed by the call center.
+
+Verified: `tests/test_realtime_gateway.py`, and the call center's own client
+against this gateway (`tools/callcenter-interop/`). Not yet verified: a real
+SIP call through FreeSWITCH.
